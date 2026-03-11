@@ -1,0 +1,20 @@
+{
+  "name": "pi-relay",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "dependencies": {
+    "discord.js": "^14.18.0",
+    "yaml": "^2.7.0"
+  },
+  "devDependencies": {
+    "@mariozechner/pi-coding-agent": "latest",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.3"
+  }
+}

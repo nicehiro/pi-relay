@@ -1,0 +1,11 @@
+discord:
+  token: "BOT_TOKEN"       # or omit and set env DISCORD_BOT_TOKEN
+
+machine:
+  name: "workstation"       # display name for this machine
+
+channels:
+  - "123456789012345678"    # channel IDs this machine responds to
+
+auth:
+  users: []                 # Discord user IDs allowed (empty = all)
