@@ -25,21 +25,25 @@ Machine A                    Machine B
 - **Multi-turn**: Typing indicators persist across tool calls until the full response is complete
 - **Per-machine isolation**: Each instance filters to its own channel IDs
 
+## Install
+
+```bash
+pi install https://github.com/nicehiro/pi-relay
+```
+
+Or add it to `~/.pi/agent/settings.json` manually:
+
+```json
+{
+  "packages": ["git:github.com/nicehiro/pi-relay"]
+}
+```
+
 ## Setup
 
 1. Create a Discord bot and invite it to your server with `Send Messages`, `Read Message History`, and `View Channels` permissions.
 
-2. Clone and install:
-   ```bash
-   git clone https://github.com/nicehiro/pi-relay.git
-   cd pi-relay
-   npm install
-   ```
-
-3. Copy and edit the config:
-   ```bash
-   cp config.example.yaml config.yaml
-   ```
+2. Create the config at `~/.pi/agent/relay.yaml`:
    ```yaml
    discord:
      token: "BOT_TOKEN"       # or set env DISCORD_BOT_TOKEN
@@ -52,11 +56,6 @@ Machine A                    Machine B
 
    auth:
      users: []                 # Discord user IDs allowed (empty = all)
-   ```
-
-4. Add to your pi config (`~/.pi/agent/extensions`):
-   ```
-   /path/to/pi-relay
    ```
 
 ## Usage
