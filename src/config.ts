@@ -13,6 +13,7 @@ interface RawConfig {
   machine?: { name?: string };
   channels?: string[];
   auth?: { users?: string[] };
+  proxy?: string;
 }
 
 export function loadConfig(): RelayConfig {
@@ -42,5 +43,6 @@ export function loadConfig(): RelayConfig {
     machine: { name: raw.machine?.name ?? "unknown" },
     channels,
     auth: { users: raw.auth?.users ?? [] },
+    proxy: raw.proxy ?? process.env.HTTPS_PROXY ?? process.env.HTTP_PROXY ?? process.env.ALL_PROXY,
   };
 }

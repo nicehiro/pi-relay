@@ -9,6 +9,7 @@ export interface RelayConfig {
   auth: {
     users: string[];
   };
+  proxy?: string;
 }
 
 export interface PendingChat {

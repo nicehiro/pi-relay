@@ -2,7 +2,8 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import type { AssistantMessage } from "@mariozechner/pi-ai";
 import { Type } from "@sinclair/typebox";
 import { loadConfig } from "./config.js";
-import { DiscordClient, type DiscordImage } from "./discord.js";
+import { setupProxy } from "./proxy.js";
+import type { DiscordClient, DiscordImage } from "./discord.js";
 import {
   formatIncoming,
   extractText,
@@ -69,12 +70,19 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  async function createDiscordClient() {
+    const config = loadConfig();
+    configRef = config;
+    setupProxy(config.proxy);
+    const { DiscordClient } = await import("./discord.js");
+    discord = new DiscordClient(config, createMessageHandler);
+    await discord.connect();
+    return config;
+  }
+
   pi.on("session_start", async (_event, ctx) => {
     try {
-      const config = loadConfig();
-      configRef = config;
-      discord = new DiscordClient(config, createMessageHandler);
-      await discord.connect();
+      const config = await createDiscordClient();
       ctx.ui.setStatus("pi-relay", `🔗 ${config.machine.name}`);
       ctx.ui.notify(`pi-relay connected as bot to ${config.channels.length} channel(s)`, "info");
     } catch (e: any) {
@@ -215,9 +223,7 @@ export default function (pi: ExtensionAPI) {
       if (sub === "reconnect") {
         try {
           await discord?.disconnect();
-          const config = loadConfig();
-          discord = new DiscordClient(config, createMessageHandler);
-          await discord.connect();
+          const config = await createDiscordClient();
           ctx.ui.setStatus("pi-relay", `🔗 ${config.machine.name}`);
           ctx.ui.notify("Reconnected to Discord", "info");
         } catch (e: any) {
