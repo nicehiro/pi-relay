@@ -2,6 +2,8 @@ import {
   Client,
   Events,
   GatewayIntentBits,
+  ChannelType,
+  Partials,
   AttachmentBuilder,
   type Message,
   type TextChannel,
@@ -78,6 +80,8 @@ export class DiscordClient {
   private botUserId: string | null = null;
   private lastProcessedMessageId: string | null = null;
   private _connected = false;
+  private _threadId: string | null = null;
+  public onThreadArchived: ((threadId: string) => void) | null = null;
 
   constructor(
     private config: RelayConfig,
@@ -88,6 +92,14 @@ export class DiscordClient {
     return this._connected;
   }
 
+  get threadId() {
+    return this._threadId;
+  }
+
+  bindThread(threadId: string): void {
+    this._threadId = threadId;
+  }
+
   async connect(): Promise<void> {
     const client = new Client({
       intents: [
@@ -96,6 +108,7 @@ export class DiscordClient {
         GatewayIntentBits.DirectMessages,
         GatewayIntentBits.MessageContent,
       ],
+      partials: [Partials.Channel],
     });
 
     client.on(Events.MessageCreate, (message) => {
@@ -122,6 +135,18 @@ export class DiscordClient {
       console.log(`[pi-relay] Discord reconnected`);
     });
 
+    client.on(Events.ThreadUpdate, async (_oldThread, newThread) => {
+      if (!this.onThreadArchived) return;
+      const thread = newThread.partial ? await newThread.fetch() : newThread;
+      if (thread.archived && thread.parentId && this.config.channels.includes(thread.parentId)) {
+        this.onThreadArchived(thread.id);
+      }
+    });
+
+    client.on(Events.ThreadDelete, (thread) => {
+      this.onThreadArchived?.(thread.id);
+    });
+
     await client.login(this.config.discord.token);
     this.client = client;
   }
@@ -131,7 +156,26 @@ export class DiscordClient {
       this.client.destroy();
       this.client = null;
       this._connected = false;
+      this._threadId = null;
     }
+  }
+
+  async createThread(channelId: string, name: string, welcomeMessage: string): Promise<string> {
+    if (!this.client) throw new Error("Discord client not connected");
+
+    const channel = await this.client.channels.fetch(channelId);
+    if (!channel || !("threads" in channel)) {
+      throw new Error(`Channel ${channelId} not found or doesn't support threads`);
+    }
+
+    const thread = await (channel as TextChannel).threads.create({
+      name: name.slice(0, 100),
+      autoArchiveDuration: 1440,
+      type: ChannelType.PublicThread,
+    });
+
+    await thread.send(welcomeMessage);
+    return thread.id;
   }
 
   private async handleMessage(message: Message): Promise<void> {
@@ -140,7 +184,14 @@ export class DiscordClient {
     if (message.id === this.lastProcessedMessageId) return;
 
     const channelId = message.channelId;
-    if (!this.config.channels.includes(channelId)) return;
+
+    if (this._threadId) {
+      // Session mode: only process messages in our thread
+      if (channelId !== this._threadId) return;
+    } else {
+      // Master mode: only process messages in configured channels
+      if (!this.config.channels.includes(channelId)) return;
+    }
 
     if (
       this.config.auth.users.length > 0 &&
@@ -156,7 +207,6 @@ export class DiscordClient {
       for (const attachment of message.attachments.values()) {
         if (isImageAttachment(attachment)) {
           const mime = guessMimeType(attachment);
-          // Use proxyURL (media.discordapp.net) — cdn.discordapp.com may be blocked
           const url = attachment.proxyURL ?? attachment.url;
           const img = await fetchImageAsBase64(url, mime);
           if (img) images.push(img);
@@ -200,6 +250,16 @@ export class DiscordClient {
 
     const attachment = new AttachmentBuilder(data, { name: filename, description });
     await (channel as TextChannel).send({ files: [attachment] });
+  }
+
+  async getThreadName(): Promise<string | null> {
+    if (!this.client || !this._threadId) return null;
+    try {
+      const channel = this.client.channels.cache.get(this._threadId)
+        ?? await this.client.channels.fetch(this._threadId);
+      if (channel && "name" in channel) return (channel as TextChannel).name;
+    } catch {}
+    return null;
   }
 
   getChannelNames(): Map<string, string> {

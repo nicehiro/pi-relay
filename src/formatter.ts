@@ -1,4 +1,4 @@
-import type { AssistantMessage, ToolCall, TextContent, ThinkingContent } from "@mariozechner/pi-ai";
+import type { AssistantMessage, ToolCall, TextContent } from "@mariozechner/pi-ai";
 
 const DISCORD_MAX_LEN = 2000;
 
@@ -13,26 +13,13 @@ export function extractText(message: AssistantMessage): string {
     .join("\n");
 }
 
-export function formatNonTextParts(message: AssistantMessage): string[] {
-  const parts: string[] = [];
-
-  for (const block of message.content) {
-    if (block.type === "thinking") {
-      const thinking = (block as ThinkingContent).thinking;
-      if (thinking && !thinking.startsWith("[Thinking redacted")) {
-        parts.push(`||${truncate(thinking, 1800)}||`);
-      }
-    } else if (block.type === "toolCall") {
-      parts.push(formatToolCall(block as ToolCall));
-    }
-  }
-
-  return parts;
-}
-
-function formatToolCall(tc: ToolCall): string {
-  const summary = formatToolArgs(tc);
-  return `🔧 **${tc.name}** ${summary}`;
+export function formatToolCalls(message: AssistantMessage): string[] {
+  return message.content
+    .filter((b) => b.type === "toolCall")
+    .map((b) => {
+      const tc = b as ToolCall;
+      return `🔧 **${tc.name}** ${formatToolArgs(tc)}`;
+    });
 }
 
 function formatToolArgs(tc: ToolCall): string {
@@ -50,23 +37,6 @@ function formatToolArgs(tc: ToolCall): string {
     .map(([k, v]) => `${k}=${truncate(String(v), 50)}`)
     .join(", ");
   return `(${truncate(pairs, 150)})`;
-}
-
-export function formatToolResult(
-  toolName: string,
-  content: Array<{ type: string; text?: string }>,
-  isError: boolean
-): string {
-  const text = content
-    .filter((c) => c.type === "text" && c.text)
-    .map((c) => c.text!)
-    .join("\n");
-
-  if (!text) return "";
-
-  const prefix = isError ? "❌" : "✅";
-  const truncated = truncate(text, 1500);
-  return `${prefix} ||${truncated}||`;
 }
 
 export function splitMessage(text: string, maxLen = DISCORD_MAX_LEN): string[] {

@@ -1,5 +1,9 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import type { AssistantMessage } from "@mariozechner/pi-ai";
+import { basename, join } from "node:path";
+import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { tmpdir } from "node:os";
 import { Type } from "@sinclair/typebox";
 import { loadConfig } from "./config.js";
 import { setupProxy } from "./proxy.js";
@@ -7,8 +11,7 @@ import type { DiscordClient, DiscordImage } from "./discord.js";
 import {
   formatIncoming,
   extractText,
-  formatNonTextParts,
-  formatToolResult,
+  formatToolCalls,
   splitMessage,
 } from "./formatter.js";
 import type { PendingChat } from "./types.js";
@@ -16,10 +19,44 @@ import type { PendingChat } from "./types.js";
 const COALESCE_MIN_CHARS = 1500;
 const COALESCE_IDLE_MS = 1000;
 
+const RELAY_DIR = join(process.env.HOME ?? "", ".pi/agent");
+const LOCK_FILE = join(RELAY_DIR, "relay-master.lock");
+const MAPPING_FILE = join(RELAY_DIR, "relay-mappings.json");
+
+function acquireMasterLock(): boolean {
+  if (existsSync(LOCK_FILE)) {
+    try {
+      const pid = parseInt(readFileSync(LOCK_FILE, "utf-8").trim(), 10);
+      process.kill(pid, 0);
+      return false;
+    } catch {
+      // Stale lock — remove and retry
+      try { unlinkSync(LOCK_FILE); } catch {}
+    }
+  }
+  mkdirSync(RELAY_DIR, { recursive: true });
+  try {
+    writeFileSync(LOCK_FILE, String(process.pid), { flag: "wx" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function releaseMasterLock(): void {
+  try {
+    if (!existsSync(LOCK_FILE)) return;
+    const pid = parseInt(readFileSync(LOCK_FILE, "utf-8").trim(), 10);
+    if (pid === process.pid) unlinkSync(LOCK_FILE);
+  } catch {}
+}
+
 export default function (pi: ExtensionAPI) {
   let discord: DiscordClient | null = null;
   let pendingChat: PendingChat | null = null;
   let configRef: ReturnType<typeof loadConfig> | null = null;
+  let isMaster = false;
+  const threadMappings = new Map<string, string>(); // threadId → tmux session name
 
   // Streaming coalesce state
   let streamBuffer = "";
@@ -80,11 +117,82 @@ export default function (pi: ExtensionAPI) {
     return config;
   }
 
+  async function createSessionThread(cwd: string): Promise<void> {
+    if (!discord?.connected || !configRef) return;
+
+    const channelId = configRef.channels[0];
+    if (!channelId) return;
+
+    const sessionName = pi.getSessionName();
+    const date = new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" });
+    const name = sessionName || `${date} — ${basename(cwd)}`;
+    const welcome = `🤖 **pi** session started\n📁 \`${cwd}\`\n🖥️ ${configRef.machine.name}`;
+
+    const threadId = await discord.createThread(channelId, name, welcome);
+    discord.bindThread(threadId);
+  }
+
+  // --- Master: thread→tmux mapping persistence ---
+
+  function saveMappings(): void {
+    writeFileSync(MAPPING_FILE, JSON.stringify(Object.fromEntries(threadMappings)));
+  }
+
+  function loadMappings(): void {
+    if (!existsSync(MAPPING_FILE)) return;
+    try {
+      const data = JSON.parse(readFileSync(MAPPING_FILE, "utf-8"));
+      for (const [k, v] of Object.entries(data)) threadMappings.set(k, v as string);
+    } catch {}
+  }
+
+  function handleThreadArchived(threadId: string): void {
+    const sessionName = threadMappings.get(threadId);
+    if (!sessionName) return;
+    try {
+      execFileSync("tmux", ["kill-session", "-t", sessionName]);
+    } catch (e: any) {
+      console.error(`[pi-relay] Failed to kill tmux session ${sessionName}:`, e.message);
+    }
+    threadMappings.delete(threadId);
+    saveMappings();
+  }
+
+  // --- Init: master vs session mode ---
+
+  async function initRelayMode(cwd: string): Promise<void> {
+    isMaster = acquireMasterLock();
+
+    if (isMaster) {
+      loadMappings();
+      discord!.onThreadArchived = handleThreadArchived;
+    } else {
+      const envThreadId = process.env.PI_RELAY_THREAD_ID;
+      if (envThreadId) {
+        discord!.bindThread(envThreadId);
+      } else {
+        await createSessionThread(cwd);
+      }
+    }
+
+    // Handle initial task from spawned session
+    const taskFile = process.env.PI_RELAY_INITIAL_TASK_FILE;
+    if (taskFile && existsSync(taskFile)) {
+      const task = readFileSync(taskFile, "utf-8");
+      unlinkSync(taskFile);
+      pi.sendUserMessage(task, { deliverAs: "followUp" });
+    }
+  }
+
+  // --- Events ---
+
   pi.on("session_start", async (_event, ctx) => {
     try {
       const config = await createDiscordClient();
-      ctx.ui.setStatus("pi-relay", `🔗 ${config.machine.name}`);
-      ctx.ui.notify(`pi-relay connected as bot to ${config.channels.length} channel(s)`, "info");
+      await initRelayMode(ctx.cwd);
+      const mode = isMaster ? " (master)" : "";
+      ctx.ui.setStatus("pi-relay", `🔗 ${config.machine.name}${mode}`);
+      ctx.ui.notify(`pi-relay connected${mode}`, "info");
     } catch (e: any) {
       ctx.ui.setStatus("pi-relay", "❌ disconnected");
       ctx.ui.notify(`pi-relay failed: ${e.message}`, "error");
@@ -93,7 +201,17 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_shutdown", async () => {
     resetStreamState();
+    if (isMaster) releaseMasterLock();
     await discord?.disconnect();
+  });
+
+  pi.on("session_switch", async (_event, ctx) => {
+    if (isMaster || discord?.threadId) return;
+    try {
+      await createSessionThread(ctx.cwd);
+    } catch (e: any) {
+      console.error(`[pi-relay] Failed to create thread for new session:`, e.message);
+    }
   });
 
   pi.on("turn_start", async (_event) => {
@@ -118,14 +236,12 @@ export default function (pi: ExtensionAPI) {
       scheduleFlush();
     }
 
-    // Keep typing indicator alive
     discord?.sendTyping(pendingChat.channelId);
   });
 
   pi.on("turn_end", async (event) => {
     if (!pendingChat) return;
 
-    // Cancel any pending stream flush
     if (streamTimer) {
       clearTimeout(streamTimer);
       streamTimer = null;
@@ -133,7 +249,6 @@ export default function (pi: ExtensionAPI) {
 
     const msg = event.message as unknown as AssistantMessage;
 
-    // Send any remaining unflushed text (answer only, no tool calls/thinking)
     const fullText = extractText(msg);
     const remaining = lastFlushedLength > 0 ? fullText.slice(lastFlushedLength) : fullText;
     if (remaining.trim()) {
@@ -142,7 +257,6 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
-    // Upload image content from tool results (skip text summaries)
     for (const tr of event.toolResults) {
       for (const part of tr.content) {
         if (part.type === "image" && "data" in part) {
@@ -154,14 +268,20 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
-    // Clear pending if no more tool calls
     const hasTools = msg.content.some((p) => p.type === "toolCall");
-    if (!hasTools) {
+    if (hasTools) {
+      const toolLines = formatToolCalls(msg).join("\n");
+      if (toolLines) {
+        await discord?.sendMessage(pendingChat.channelId, toolLines);
+      }
+    } else {
       pendingChat = null;
     }
 
     resetStreamState();
   });
+
+  // --- Tools ---
 
   pi.registerTool({
     name: "discord_send",
@@ -174,7 +294,7 @@ export default function (pi: ExtensionAPI) {
       if (!discord?.connected) {
         throw new Error("Discord is not connected");
       }
-      const channelId = configRef?.channels[0];
+      const channelId = discord.threadId ?? configRef?.channels[0];
       if (!channelId) {
         throw new Error("No channel configured");
       }
@@ -191,6 +311,66 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  pi.registerTool({
+    name: "spawn_session",
+    label: "Spawn Session",
+    description: "Spawn a new pi session in a tmux session with its own Discord thread",
+    promptGuidelines: [
+      "Use spawn_session when a Discord user asks to start a new session or work on a task in a specific directory",
+      "Extract working directory, session name, and task from the user's free-form request",
+      "If no directory is specified, leave cwd empty to default to home directory",
+    ],
+    parameters: Type.Object({
+      cwd: Type.Optional(Type.String({ description: "Working directory (default: ~)" })),
+      name: Type.Optional(Type.String({ description: "Session/thread name" })),
+      task: Type.Optional(Type.String({ description: "Initial task for the new session" })),
+    }),
+    async execute(_toolCallId, params) {
+      if (!isMaster) throw new Error("spawn_session is only available on the master instance");
+      if (!discord?.connected || !configRef) throw new Error("Discord not connected");
+
+      const cwd = params.cwd || process.env.HOME || "/root";
+      const channelId = configRef.channels[0];
+      if (!channelId) throw new Error("No channel configured");
+
+      // Thread name
+      const date = new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" });
+      const name = params.name || `${date} — ${basename(cwd)}`;
+
+      // Create thread
+      const welcome = `🤖 **pi** session spawned\n📁 \`${cwd}\`\n🖥️ ${configRef.machine.name}`;
+      const threadId = await discord.createThread(channelId, name, welcome);
+
+      // tmux session name: thread name + timestamp
+      const ts = Math.floor(Date.now() / 1000);
+      const safeName = name.replace(/[^a-zA-Z0-9-]/g, "_").slice(0, 30);
+      const sessionName = `pi-${safeName}-${ts}`;
+
+      // Write initial task to temp file
+      let taskFile: string | undefined;
+      if (params.task) {
+        taskFile = join(tmpdir(), `pi-relay-init-${threadId}`);
+        writeFileSync(taskFile, params.task);
+      }
+
+      // Build shell command and spawn tmux session
+      const envExports = [`export PI_RELAY_THREAD_ID=${threadId}`];
+      if (taskFile) envExports.push(`export PI_RELAY_INITIAL_TASK_FILE='${taskFile}'`);
+      const shellCmd = [...envExports, `cd '${cwd}'`, "exec pi"].join(" && ");
+      execFileSync("tmux", ["new-session", "-d", "-s", sessionName, shellCmd]);
+
+      threadMappings.set(threadId, sessionName);
+      saveMappings();
+
+      return {
+        content: [{ type: "text", text: `Spawned session in thread "${name}" (tmux: ${sessionName})\ncwd: ${cwd}` }],
+        details: {},
+      };
+    },
+  });
+
+  // --- Commands ---
+
   pi.registerCommand("relay", {
     description: "Show Discord relay status",
     handler: async (args, ctx) => {
@@ -202,18 +382,25 @@ export default function (pi: ExtensionAPI) {
         const lines = [
           `**pi-relay**`,
           `Status: ${connected ? "🟢 connected" : "🔴 disconnected"}`,
+          `Mode: ${isMaster ? "master" : "session"}`,
         ];
 
-        try {
-          const config = loadConfig();
-          lines.push(`Machine: ${config.machine.name}`);
+        if (configRef) {
+          lines.push(`Machine: ${configRef.machine.name}`);
           lines.push(`Channels:`);
-          for (const id of config.channels) {
+          for (const id of configRef.channels) {
             const name = channelNames.get(id) ?? "unknown";
             lines.push(`  #${name} (${id})`);
           }
-        } catch {
-          lines.push(`Config: error loading`);
+          if (discord?.threadId) {
+            const threadName = await discord.getThreadName();
+            lines.push(`Thread: ${threadName ?? discord.threadId}`);
+          }
+          if (isMaster && threadMappings.size > 0) {
+            lines.push(`Spawned sessions: ${threadMappings.size}`);
+          }
+        } else {
+          lines.push(`Config: not loaded`);
         }
 
         ctx.ui.notify(lines.join("\n"), "info");
@@ -222,10 +409,13 @@ export default function (pi: ExtensionAPI) {
 
       if (sub === "reconnect") {
         try {
+          if (isMaster) releaseMasterLock();
           await discord?.disconnect();
           const config = await createDiscordClient();
-          ctx.ui.setStatus("pi-relay", `🔗 ${config.machine.name}`);
-          ctx.ui.notify("Reconnected to Discord", "info");
+          await initRelayMode(ctx.cwd);
+          const mode = isMaster ? " (master)" : "";
+          ctx.ui.setStatus("pi-relay", `🔗 ${config.machine.name}${mode}`);
+          ctx.ui.notify(`Reconnected${mode}`, "info");
         } catch (e: any) {
           ctx.ui.notify(`Reconnect failed: ${e.message}`, "error");
         }
@@ -233,6 +423,7 @@ export default function (pi: ExtensionAPI) {
       }
 
       if (sub === "disconnect") {
+        if (isMaster) releaseMasterLock();
         await discord?.disconnect();
         ctx.ui.setStatus("pi-relay", "⚪ disconnected");
         ctx.ui.notify("Disconnected from Discord", "info");
