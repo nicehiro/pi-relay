@@ -80,7 +80,6 @@ export class DiscordClient {
   private botUserId: string | null = null;
   private lastProcessedMessageId: string | null = null;
   private _connected = false;
-  private _threadId: string | null = null;
   public onThreadArchived: ((threadId: string) => void) | null = null;
 
   constructor(
@@ -90,14 +89,6 @@ export class DiscordClient {
 
   get connected() {
     return this._connected;
-  }
-
-  get threadId() {
-    return this._threadId;
-  }
-
-  bindThread(threadId: string): void {
-    this._threadId = threadId;
   }
 
   async connect(): Promise<void> {
@@ -156,7 +147,6 @@ export class DiscordClient {
       this.client.destroy();
       this.client = null;
       this._connected = false;
-      this._threadId = null;
     }
   }
 
@@ -185,13 +175,11 @@ export class DiscordClient {
 
     const channelId = message.channelId;
 
-    if (this._threadId) {
-      // Session mode: only process messages in our thread
-      if (channelId !== this._threadId) return;
-    } else {
-      // Master mode: only process messages in configured channels
-      if (!this.config.channels.includes(channelId)) return;
-    }
+    // Accept messages in configured channels or threads under them
+    const isConfiguredChannel = this.config.channels.includes(channelId);
+    const parentId = message.channel.isThread() ? message.channel.parentId : null;
+    const isChildThread = !!parentId && this.config.channels.includes(parentId);
+    if (!isConfiguredChannel && !isChildThread) return;
 
     if (
       this.config.auth.users.length > 0 &&
@@ -250,16 +238,6 @@ export class DiscordClient {
 
     const attachment = new AttachmentBuilder(data, { name: filename, description });
     await (channel as TextChannel).send({ files: [attachment] });
-  }
-
-  async getThreadName(): Promise<string | null> {
-    if (!this.client || !this._threadId) return null;
-    try {
-      const channel = this.client.channels.cache.get(this._threadId)
-        ?? await this.client.channels.fetch(this._threadId);
-      if (channel && "name" in channel) return (channel as TextChannel).name;
-    } catch {}
-    return null;
   }
 
   getChannelNames(): Map<string, string> {
