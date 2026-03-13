@@ -9,3 +9,5 @@ channels:
 
 auth:
   users: []                 # Discord user IDs allowed (empty = all)
+
+# proxy: "socks5://127.0.0.1:1080"  # optional, or set HTTPS_PROXY env

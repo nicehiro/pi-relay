@@ -18,10 +18,12 @@ Machine A                    Machine B
 
 ## Features
 
-- **Discord → pi**: Messages in configured channels are forwarded to pi as user messages
-- **pi → Discord**: Assistant responses stream back with coalesced chunking (avoids rate limits)
+- **Discord ↔ pi**: Messages in configured channels are forwarded to pi; responses stream back with coalesced chunking
+- **Spawned sessions**: `spawn_session` tool creates Discord threads, each backed by an independent `pi --mode rpc` child process
 - **Image support**: Discord image attachments are passed to pi; image tool results are uploaded back
 - **Push notifications**: `discord_send` tool lets pi proactively message Discord
+- **Extension UI forwarding**: Confirm/select/input dialogs from child sessions are forwarded to Discord threads
+- **Proxy support**: Route Discord connections through HTTP/HTTPS/SOCKS proxies
 - **Multi-turn**: Typing indicators persist across tool calls until the full response is complete
 - **Per-machine isolation**: Each instance filters to its own channel IDs
 
@@ -31,7 +33,7 @@ Machine A                    Machine B
 pi install https://github.com/nicehiro/pi-relay
 ```
 
-Or add it to `~/.pi/agent/settings.json` manually:
+Or add to `~/.pi/agent/settings.json`:
 
 ```json
 {
@@ -41,7 +43,7 @@ Or add it to `~/.pi/agent/settings.json` manually:
 
 ## Setup
 
-1. Create a Discord bot and invite it to your server with `Send Messages`, `Read Message History`, and `View Channels` permissions.
+1. Create a Discord bot and invite it to your server with `Send Messages`, `Read Message History`, `View Channels`, and `Create Public Threads` permissions.
 
 2. Create the config at `~/.pi/agent/relay.yaml`:
    ```yaml
@@ -56,6 +58,8 @@ Or add it to `~/.pi/agent/settings.json` manually:
 
    auth:
      users: []                 # Discord user IDs allowed (empty = all)
+
+   proxy: "socks5://127.0.0.1:1080"  # optional, or set HTTPS_PROXY env
    ```
 
 ## Usage
@@ -64,18 +68,23 @@ Or add it to `~/.pi/agent/settings.json` manually:
 
 | Command | Description |
 |---|---|
-| `/relay` or `/relay status` | Show connection status, machine name, channels |
+| `/relay` or `/relay status` | Show connection status, machine name, channels, active sessions |
 | `/relay reconnect` | Reconnect to Discord |
 | `/relay disconnect` | Disconnect from Discord |
 
 ### Tools
 
-The `discord_send` tool is available to the LLM:
+**`discord_send`** — Send a message to the first configured channel:
 ```
 discord_send({ message: "Training complete!" })
 ```
 
-Sends to the first configured channel. Supports markdown.
+**`spawn_session`** — Spawn a new pi session in a Discord thread:
+```
+spawn_session({ cwd: "/path/to/project", name: "my-task", task: "fix the tests" })
+```
+
+Creates a thread in the channel, starts a `pi --mode rpc` child process in the given directory, and routes all thread messages to that session. The child session has full tool access and forwards Extension UI prompts (confirmations, selections, text input) back to the thread for the user to respond to.
 
 ## License
 
