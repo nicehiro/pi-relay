@@ -37,13 +37,20 @@ export default function (pi: ExtensionAPI) {
     const newContent = streamBuffer.slice(lastFlushedLength);
     if (!newContent.trim()) return;
 
-    const chunks = splitMessage(newContent);
+    // Only flush up to the last complete line to avoid splitting mid-sentence
+    const lastNewline = newContent.lastIndexOf("\n");
+    if (lastNewline === -1) return; // no complete line yet, wait
+
+    const flushable = newContent.slice(0, lastNewline + 1);
+    if (!flushable.trim()) return;
+
+    const chunks = splitMessage(flushable);
     for (const chunk of chunks) {
       discord?.sendMessage(pendingChat.channelId, chunk).catch((e) => {
         console.error(`[pi-relay] Failed to send stream chunk:`, e);
       });
     }
-    lastFlushedLength = streamBuffer.length;
+    lastFlushedLength += flushable.length;
   }
 
   function resetStreamState() {

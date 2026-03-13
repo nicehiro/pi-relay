@@ -306,12 +306,20 @@ export class RpcChild {
     if (this.streamBuffer.length <= this.lastFlushedLength) return;
     const newContent = this.streamBuffer.slice(this.lastFlushedLength);
     if (!newContent.trim()) return;
-    for (const chunk of splitMessage(newContent)) {
+
+    // Only flush up to the last complete line to avoid splitting mid-sentence
+    const lastNewline = newContent.lastIndexOf("\n");
+    if (lastNewline === -1) return; // no complete line yet, wait
+
+    const flushable = newContent.slice(0, lastNewline + 1);
+    if (!flushable.trim()) return;
+
+    for (const chunk of splitMessage(flushable)) {
       this.discord.sendMessage(this.threadId, chunk).catch(e => {
         console.error(`[pi-relay] Stream flush error:`, e);
       });
     }
-    this.lastFlushedLength = this.streamBuffer.length;
+    this.lastFlushedLength += flushable.length;
   }
 
   private resetStreamState(): void {
