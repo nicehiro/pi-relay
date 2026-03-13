@@ -208,13 +208,28 @@ export class DiscordClient {
     this.onMessage(channelId, username, message.content ?? "", images);
   }
 
-  async sendMessage(channelId: string, text: string): Promise<void> {
-    if (!this.client) return;
+  async sendMessage(channelId: string, text: string): Promise<string | null> {
+    if (!this.client) return null;
 
     const channel = await this.client.channels.fetch(channelId);
-    if (!channel || !("send" in channel)) return;
+    if (!channel || !("send" in channel)) return null;
 
-    await (channel as TextChannel).send(text);
+    const msg = await (channel as TextChannel).send(text);
+    return msg.id;
+  }
+
+  async editMessage(channelId: string, messageId: string, text: string): Promise<boolean> {
+    if (!this.client) return false;
+    try {
+      const channel = await this.client.channels.fetch(channelId);
+      if (!channel || !("messages" in channel)) return false;
+      const msg = await (channel as TextChannel).messages.fetch(messageId);
+      await msg.edit(text);
+      return true;
+    } catch (e: any) {
+      console.error(`[pi-relay] Edit message failed:`, e.message);
+      return false;
+    }
   }
 
   async sendTyping(channelId: string): Promise<void> {

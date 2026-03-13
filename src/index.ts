@@ -12,60 +12,18 @@ import {
   splitMessage,
 } from "./formatter.js";
 import { RpcChild } from "./rpc-child.js";
+import { StreamCoalescer } from "./stream.js";
 import type { PendingChat } from "./types.js";
 
-const COALESCE_MIN_CHARS = 1500;
-const COALESCE_IDLE_MS = 1000;
-
 export default function (pi: ExtensionAPI) {
-  // Child RPC processes inherit the extension but must not connect to Discord
-  // or register tools — the parent handles all Discord I/O for them.
   if (process.env.PI_RELAY_CHILD) return;
   let discord: DiscordClient | null = null;
   let pendingChat: PendingChat | null = null;
   let configRef: ReturnType<typeof loadConfig> | null = null;
-  const children = new Map<string, RpcChild>(); // threadId → RpcChild
+  const children = new Map<string, RpcChild>();
 
-  // Streaming coalesce state (master's own messages)
-  let streamBuffer = "";
-  let streamTimer: ReturnType<typeof setTimeout> | null = null;
-  let lastFlushedLength = 0;
-
-  function flushStreamBuffer() {
-    if (!pendingChat || streamBuffer.length <= lastFlushedLength) return;
-
-    const newContent = streamBuffer.slice(lastFlushedLength);
-    if (!newContent.trim()) return;
-
-    // Only flush up to the last complete line to avoid splitting mid-sentence
-    const lastNewline = newContent.lastIndexOf("\n");
-    if (lastNewline === -1) return; // no complete line yet, wait
-
-    const flushable = newContent.slice(0, lastNewline + 1);
-    if (!flushable.trim()) return;
-
-    const chunks = splitMessage(flushable);
-    for (const chunk of chunks) {
-      discord?.sendMessage(pendingChat.channelId, chunk).catch((e) => {
-        console.error(`[pi-relay] Failed to send stream chunk:`, e);
-      });
-    }
-    lastFlushedLength += flushable.length;
-  }
-
-  function resetStreamState() {
-    streamBuffer = "";
-    lastFlushedLength = 0;
-    if (streamTimer) {
-      clearTimeout(streamTimer);
-      streamTimer = null;
-    }
-  }
-
-  function scheduleFlush() {
-    if (streamTimer) clearTimeout(streamTimer);
-    streamTimer = setTimeout(flushStreamBuffer, COALESCE_IDLE_MS);
-  }
+  let coalescer: StreamCoalescer | null = null;
+  let prevTextLen = 0;
 
   function handleDiscordMessage(channelId: string, username: string, content: string, images: DiscordImage[]) {
     // Route to RPC child if message is in a managed thread
@@ -83,7 +41,9 @@ export default function (pi: ExtensionAPI) {
     if (!configRef?.channels.includes(channelId)) return;
 
     pendingChat = { channelId, username };
-    resetStreamState();
+    coalescer?.reset();
+    coalescer = null;
+    prevTextLen = 0;
     if (images.length > 0) {
       const parts: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = [];
       parts.push({ type: "text", text: formatIncoming(username, content || "[image]") });
@@ -135,7 +95,8 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async () => {
-    resetStreamState();
+    coalescer?.reset();
+    coalescer = null;
     killAllChildren();
     await discord?.disconnect();
   });
@@ -146,7 +107,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("message_update", async (event) => {
-    if (!pendingChat) return;
+    if (!pendingChat || !discord) return;
 
     const msg = event.message;
     if (!msg || (msg as any).role !== "assistant") return;
@@ -154,34 +115,30 @@ export default function (pi: ExtensionAPI) {
     const assistantMsg = msg as unknown as AssistantMessage;
     const currentText = extractText(assistantMsg);
 
-    streamBuffer = currentText;
-
-    if (streamBuffer.length - lastFlushedLength >= COALESCE_MIN_CHARS) {
-      flushStreamBuffer();
-    } else {
-      scheduleFlush();
+    if (currentText.length > prevTextLen) {
+      if (!coalescer) {
+        coalescer = new StreamCoalescer(pendingChat.channelId, discord);
+      }
+      coalescer.append(currentText.slice(prevTextLen));
     }
-
-    discord?.sendTyping(pendingChat.channelId);
+    prevTextLen = currentText.length;
   });
 
   pi.on("turn_end", async (event) => {
     if (!pendingChat) return;
 
-    if (streamTimer) {
-      clearTimeout(streamTimer);
-      streamTimer = null;
-    }
-
     const msg = event.message as unknown as AssistantMessage;
-
     const fullText = extractText(msg);
-    const remaining = lastFlushedLength > 0 ? fullText.slice(lastFlushedLength) : fullText;
-    if (remaining.trim()) {
-      for (const chunk of splitMessage(remaining)) {
-        await discord?.sendMessage(pendingChat.channelId, chunk);
-      }
+
+    if (fullText.length > prevTextLen && coalescer) {
+      coalescer.append(fullText.slice(prevTextLen));
     }
+
+    if (coalescer) {
+      await coalescer.flush();
+      coalescer = null;
+    }
+    prevTextLen = 0;
 
     for (const tr of event.toolResults) {
       for (const part of tr.content) {
@@ -203,8 +160,6 @@ export default function (pi: ExtensionAPI) {
     } else {
       pendingChat = null;
     }
-
-    resetStreamState();
   });
 
   // --- Tools ---

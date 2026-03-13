@@ -1,9 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import type { DiscordClient } from "./discord.js";
 import { splitMessage } from "./formatter.js";
-
-const COALESCE_MIN_CHARS = 1500;
-const COALESCE_IDLE_MS = 1000;
+import { StreamCoalescer } from "./stream.js";
 
 // Matches ANSI escape sequences: CSI (ESC[...), OSC (ESC]...\x07 or ESC]...\x1b\\), and single ESC+char
 const ANSI_RE = /\x1b(?:\[[0-9;]*[A-Za-z]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[^[\]])/g;
@@ -18,10 +16,7 @@ export class RpcChild {
   private process: ChildProcess | null = null;
   private _alive = false;
   private _streaming = false;
-
-  private streamBuffer = "";
-  private streamTimer: ReturnType<typeof setTimeout> | null = null;
-  private lastFlushedLength = 0;
+  private coalescer: StreamCoalescer | null = null;
 
   private pendingUI: PendingUIRequest | null = null;
   private eventQueue: Promise<void> = Promise.resolve();
@@ -67,7 +62,8 @@ export class RpcChild {
     this.process.on("exit", (code) => {
       this._alive = false;
       this._streaming = false;
-      this.resetStreamState();
+      this.coalescer?.reset();
+      this.coalescer = null;
       console.log(`[pi-relay] RPC child ${this.threadId.slice(-6)} exited (code ${code})`);
       this.onExit?.();
     });
@@ -135,7 +131,8 @@ export class RpcChild {
       this.process.kill("SIGTERM");
       this._alive = false;
     }
-    this.resetStreamState();
+    this.coalescer?.reset();
+    this.coalescer = null;
   }
 
   // --- Private ---
@@ -162,7 +159,7 @@ export class RpcChild {
     switch (event.type) {
       case "agent_start":
         this._streaming = true;
-        this.resetStreamState();
+        this.coalescer = new StreamCoalescer(this.threadId, this.discord);
         await this.discord.sendTyping(this.threadId);
         break;
 
@@ -199,31 +196,16 @@ export class RpcChild {
     const delta = event.assistantMessageEvent as Record<string, unknown> | undefined;
     if (!delta || delta.type !== "text_delta") return;
 
-    this.streamBuffer += delta.delta as string;
-
-    if (this.streamBuffer.length - this.lastFlushedLength >= COALESCE_MIN_CHARS) {
-      this.flushStreamBuffer();
-    } else {
-      this.scheduleFlush();
+    if (!this.coalescer) {
+      this.coalescer = new StreamCoalescer(this.threadId, this.discord);
     }
-
-    await this.discord.sendTyping(this.threadId);
+    this.coalescer.append(delta.delta as string);
   }
 
   private async handleTurnEnd(event: Record<string, unknown>): Promise<void> {
-    if (this.streamTimer) {
-      clearTimeout(this.streamTimer);
-      this.streamTimer = null;
-    }
-
-    // Flush remaining text
-    if (this.streamBuffer.length > this.lastFlushedLength) {
-      const remaining = this.streamBuffer.slice(this.lastFlushedLength);
-      if (remaining.trim()) {
-        for (const chunk of splitMessage(remaining)) {
-          await this.discord.sendMessage(this.threadId, chunk);
-        }
-      }
+    if (this.coalescer) {
+      await this.coalescer.flush();
+      this.coalescer = null;
     }
 
     // Upload images from tool results
@@ -260,8 +242,6 @@ export class RpcChild {
         await this.discord.sendMessage(this.threadId, lines.join("\n"));
       }
     }
-
-    this.resetStreamState();
   }
 
   private handleUIRequest(req: Record<string, unknown>): void {
@@ -300,39 +280,5 @@ export class RpcChild {
       const prefill = req.prefill ? `\n\`\`\`\n${req.prefill}\n\`\`\`` : "";
       this.discord.sendMessage(this.threadId, `📝 **${title}**${prefill}\n*Reply with edited text, or \`/cancel\` to cancel*`);
     }
-  }
-
-  private flushStreamBuffer(): void {
-    if (this.streamBuffer.length <= this.lastFlushedLength) return;
-    const newContent = this.streamBuffer.slice(this.lastFlushedLength);
-    if (!newContent.trim()) return;
-
-    // Only flush up to the last complete line to avoid splitting mid-sentence
-    const lastNewline = newContent.lastIndexOf("\n");
-    if (lastNewline === -1) return; // no complete line yet, wait
-
-    const flushable = newContent.slice(0, lastNewline + 1);
-    if (!flushable.trim()) return;
-
-    for (const chunk of splitMessage(flushable)) {
-      this.discord.sendMessage(this.threadId, chunk).catch(e => {
-        console.error(`[pi-relay] Stream flush error:`, e);
-      });
-    }
-    this.lastFlushedLength += flushable.length;
-  }
-
-  private resetStreamState(): void {
-    this.streamBuffer = "";
-    this.lastFlushedLength = 0;
-    if (this.streamTimer) {
-      clearTimeout(this.streamTimer);
-      this.streamTimer = null;
-    }
-  }
-
-  private scheduleFlush(): void {
-    if (this.streamTimer) clearTimeout(this.streamTimer);
-    this.streamTimer = setTimeout(() => this.flushStreamBuffer(), COALESCE_IDLE_MS);
   }
 }
