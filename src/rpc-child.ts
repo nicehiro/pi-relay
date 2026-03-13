@@ -1,7 +1,17 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import type { DiscordClient } from "./discord.js";
 import { splitMessage } from "./formatter.js";
 import { StreamCoalescer } from "./stream.js";
+
+function resolvePiBinary(): string {
+  try {
+    return execFileSync("which", ["pi"], { encoding: "utf-8" }).trim();
+  } catch {
+    return "/usr/local/bin/pi";
+  }
+}
+
+const PI_BIN = resolvePiBinary();
 
 // Matches ANSI escape sequences: CSI (ESC[...), OSC (ESC]...\x07 or ESC]...\x1b\\), and single ESC+char
 const ANSI_RE = /\x1b(?:\[[0-9;]*[A-Za-z]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[^[\]])/g;
@@ -33,7 +43,7 @@ export class RpcChild {
   get hasPendingUI() { return this.pendingUI !== null; }
 
   start(initialTask?: string): void {
-    this.process = spawn("pi", ["--mode", "rpc", "--no-session"], {
+    this.process = spawn(PI_BIN, ["--mode", "rpc", "--no-session"], {
       cwd: this.cwd,
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env, PI_RELAY_CHILD: "1" },
