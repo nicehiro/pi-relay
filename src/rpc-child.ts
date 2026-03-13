@@ -41,7 +41,7 @@ export class RpcChild {
     this.process = spawn("pi", ["--mode", "rpc", "--no-session"], {
       cwd: this.cwd,
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env },
+      env: { ...process.env, PI_RELAY_CHILD: "1" },
     });
 
     this._alive = true;

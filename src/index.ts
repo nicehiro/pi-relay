@@ -18,6 +18,9 @@ const COALESCE_MIN_CHARS = 1500;
 const COALESCE_IDLE_MS = 1000;
 
 export default function (pi: ExtensionAPI) {
+  // Child RPC processes inherit the extension but must not connect to Discord
+  // or register tools — the parent handles all Discord I/O for them.
+  if (process.env.PI_RELAY_CHILD) return;
   let discord: DiscordClient | null = null;
   let pendingChat: PendingChat | null = null;
   let configRef: ReturnType<typeof loadConfig> | null = null;
