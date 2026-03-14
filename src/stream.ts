@@ -10,6 +10,7 @@ export class StreamCoalescer {
   private activeMsgId: string | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private pending: Promise<void> = Promise.resolve();
+  private reopenFence: string | null = null; // fence marker to prepend on next cycle
 
   constructor(
     private channelId: string,
@@ -25,7 +26,11 @@ export class StreamCoalescer {
     this.cancelTimer();
     await this.pending;
 
-    const remaining = this.buffer.slice(this.finalizedUpTo);
+    let remaining = this.buffer.slice(this.finalizedUpTo);
+    if (this.reopenFence) {
+      remaining = this.reopenFence + "\n" + remaining;
+      this.reopenFence = null;
+    }
     if (!remaining.trim()) {
       this.reset();
       return;
@@ -56,6 +61,7 @@ export class StreamCoalescer {
     this.buffer = "";
     this.finalizedUpTo = 0;
     this.activeMsgId = null;
+    this.reopenFence = null;
     this.cancelTimer();
   }
 
@@ -77,16 +83,27 @@ export class StreamCoalescer {
   }
 
   private async doEdit(): Promise<void> {
-    const content = this.buffer.slice(this.finalizedUpTo);
+    let content = this.buffer.slice(this.finalizedUpTo);
+    if (this.reopenFence) {
+      content = this.reopenFence + "\n" + content;
+    }
     if (!content.trim()) return;
 
     // Active message is full — finalize it, start a new one next cycle
     if (this.activeMsgId && content.length > MSG_SOFT_LIMIT) {
-      const splitAt = findSplitPoint(content, MSG_SOFT_LIMIT);
+      const splitAt = findSafeSplitPoint(content, MSG_SOFT_LIMIT);
+      const head = content.slice(0, splitAt);
+      const openMarker = findUnclosedFence(head);
+      const finalText = openMarker ? head + "\n```" : head;
       const ok = await this.discord.editMessage(
-        this.channelId, this.activeMsgId, content.slice(0, splitAt),
+        this.channelId, this.activeMsgId, finalText,
       );
-      if (ok) this.finalizedUpTo += splitAt;
+      if (ok) {
+        // Adjust finalizedUpTo: account for reopenFence prefix we prepended
+        const prefixLen = this.reopenFence ? this.reopenFence.length + 1 : 0;
+        this.finalizedUpTo += splitAt - prefixLen;
+        this.reopenFence = openMarker;
+      }
       this.activeMsgId = null;
       if (this.buffer.length > this.finalizedUpTo) this.scheduleEdit();
       return;
@@ -98,9 +115,13 @@ export class StreamCoalescer {
         : content;
       this.activeMsgId = await this.discord.sendMessage(this.channelId, toSend);
       if (toSend.length >= MSG_SOFT_LIMIT && this.activeMsgId) {
-        this.finalizedUpTo += toSend.length;
+        const prefixLen = this.reopenFence ? this.reopenFence.length + 1 : 0;
+        this.finalizedUpTo += toSend.length - prefixLen;
+        this.reopenFence = findUnclosedFence(toSend);
         this.activeMsgId = null;
         if (this.buffer.length > this.finalizedUpTo) this.scheduleEdit();
+      } else {
+        this.reopenFence = null;
       }
     } else {
       const ok = await this.discord.editMessage(this.channelId, this.activeMsgId, content);
@@ -109,12 +130,62 @@ export class StreamCoalescer {
   }
 }
 
-function findSplitPoint(text: string, limit: number): number {
-  let idx = text.lastIndexOf("\n\n", limit);
-  if (idx > limit * 0.5) return idx + 2;
-  idx = text.lastIndexOf("\n", limit);
+const FENCE_LINE_RE = /^(`{3,}|~{3,})(.*)?$/;
+
+// Find a split point that avoids breaking inside fenced code blocks.
+// Prefers splitting at a paragraph/line boundary outside a fence.
+function findSafeSplitPoint(text: string, limit: number): number {
+  const candidate = text.slice(0, limit);
+  const lines = candidate.split("\n");
+
+  let fenceMarker: string | null = null;
+  let fenceMarkerLen = 0;
+  let lastSafeNewline = -1;
+  let pos = 0;
+
+  for (const line of lines) {
+    const trimmed = line.trimStart();
+    const m = trimmed.match(FENCE_LINE_RE);
+    if (m) {
+      if (!fenceMarker) {
+        fenceMarker = trimmed;
+        fenceMarkerLen = m[1].length;
+      } else if (m[1][0] === fenceMarker[0] && m[1].length >= fenceMarkerLen && !m[2]?.trim()) {
+        fenceMarker = null;
+        fenceMarkerLen = 0;
+      }
+    }
+    pos += line.length + 1;
+    if (!fenceMarker && pos <= limit) lastSafeNewline = pos;
+  }
+
+  if (lastSafeNewline > limit * 0.3) return lastSafeNewline;
+
+  let idx = text.lastIndexOf("\n", limit);
   if (idx > limit * 0.5) return idx + 1;
   idx = text.lastIndexOf(" ", limit);
   if (idx > limit * 0.3) return idx + 1;
   return limit;
+}
+
+// Return the opening fence marker if the text has an unclosed fenced code block, else null.
+function findUnclosedFence(text: string): string | null {
+  let fenceMarker: string | null = null;
+  let fenceMarkerLen = 0;
+
+  for (const line of text.split("\n")) {
+    const trimmed = line.trimStart();
+    const m = trimmed.match(FENCE_LINE_RE);
+    if (m) {
+      if (!fenceMarker) {
+        fenceMarker = trimmed;
+        fenceMarkerLen = m[1].length;
+      } else if (m[1][0] === fenceMarker[0] && m[1].length >= fenceMarkerLen && !m[2]?.trim()) {
+        fenceMarker = null;
+        fenceMarkerLen = 0;
+      }
+    }
+  }
+
+  return fenceMarker;
 }
