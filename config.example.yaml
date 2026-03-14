@@ -1,13 +1,14 @@
 discord:
-  token: "BOT_TOKEN"       # or omit and set env DISCORD_BOT_TOKEN
+  token: "BOT_TOKEN"                # or omit and set env DISCORD_BOT_TOKEN
+  applicationId: "APP_ID"           # or set env DISCORD_APPLICATION_ID (for slash commands)
 
 machine:
-  name: "workstation"       # display name for this machine
+  name: "workstation"               # display name for this machine
 
 channels:
-  - "123456789012345678"    # channel IDs this machine responds to
+  - "123456789012345678"            # channel IDs this machine responds to
 
 auth:
-  users: []                 # Discord user IDs allowed (empty = all)
+  users: []                         # Discord user IDs allowed (empty = all)
 
 # proxy: "socks5://127.0.0.1:1080"  # optional, or set HTTPS_PROXY env

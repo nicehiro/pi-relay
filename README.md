@@ -63,6 +63,30 @@ When the master spawns a child session (via the `spawn_session` tool), it uses t
 - Subscribes to typed `AgentSessionEvent`s and routes them to Discord
 - Surfaces auto-compaction and auto-retry events as Discord messages
 
+### Discord interaction
+
+Users can control sessions from Discord without pi TUI access:
+
+- **Slash commands** (`/pi status`, `/pi stop`) — registered via Discord's REST API on connect when `applicationId` is configured. `/pi stop` kills the RPC child in the current thread.
+- **Cancel button** — tool call summaries in spawned threads include a Cancel button. Clicking it kills the child immediately. The button is removed when the agent finishes its turn.
+
+### Message context
+
+Incoming Discord messages are formatted with metadata before being forwarded to pi:
+
+- **Username**: `[Discord @username]: message`
+- **Reply context**: when a user replies to a specific message, the referenced message's author and content (truncated to 200 chars) are included: `[replying to author: snippet]`
+- **Images**: Discord attachments are fetched and passed as base64
+
+### Config validation
+
+Config is validated on load with structured diagnostics. Errors (missing token, missing channels) prevent startup. Warnings are logged to console:
+
+- Invalid-looking Discord snowflake IDs
+- Missing machine name
+- No auth users configured (open access)
+- Missing `applicationId` (slash commands won't register)
+
 ### Proxy support
 
 Discord connections (both WebSocket gateway and REST API) can be routed through HTTP/HTTPS/SOCKS proxies. The `proxy` config option patches both `undici` (used by `@discordjs/rest`) and `ws` (used by `@discordjs/ws`) before Discord.js is loaded.
@@ -72,11 +96,11 @@ Discord connections (both WebSocket gateway and REST API) can be routed through 
 | File | Purpose |
 |---|---|
 | `src/index.ts` | Extension entry — registers events, tools, commands; routes messages between Discord and pi |
-| `src/discord.ts` | Discord client — connect, send, edit, typing, threads, image attachments |
+| `src/discord.ts` | Discord client — connect, send, edit, typing, threads, slash commands, cancel buttons, image attachments |
 | `src/session-child.ts` | Child session via SDK `AgentSession` — event routing, stream coalescing, compaction/retry notifications |
 | `src/stream.ts` | `StreamCoalescer` — batches streaming text into Discord message edits |
 | `src/formatter.ts` | Format messages between pi and Discord (tool call summaries, message splitting) |
-| `src/config.ts` | Load and validate config from YAML |
+| `src/config.ts` | Load and validate config from YAML with structured diagnostics |
 | `src/proxy.ts` | Patch undici/ws for proxy support |
 | `src/types.ts` | Shared type definitions |
 
@@ -100,29 +124,43 @@ pi install https://github.com/nicehiro/pi-relay
 
 ```yaml
 discord:
-  token: "BOT_TOKEN"       # or set env DISCORD_BOT_TOKEN
+  token: "BOT_TOKEN"              # or set env DISCORD_BOT_TOKEN
+  applicationId: "APP_ID"         # or set env DISCORD_APPLICATION_ID (for slash commands)
 
 machine:
   name: "workstation"
 
 channels:
-  - "123456789012345678"    # channel IDs this machine responds to
+  - "123456789012345678"          # channel IDs this machine responds to
 
 auth:
-  users: []                 # Discord user IDs allowed (empty = all)
+  users: []                       # Discord user IDs allowed (empty = all)
 
 proxy: "socks5://127.0.0.1:1080"  # optional, or set HTTPS_PROXY env
 ```
 
 ## Usage
 
-### Commands
+### Pi commands
 
 | Command | Description |
 |---|---|
 | `/relay` or `/relay status` | Connection status, machine name, channels, active child sessions |
 | `/relay reconnect` | Reconnect to Discord (kills all child sessions) |
 | `/relay disconnect` | Disconnect from Discord |
+
+### Discord slash commands
+
+Requires `applicationId` in config. Registered automatically on connect.
+
+| Command | Description |
+|---|---|
+| `/pi status` | Show pi-relay status (ephemeral) |
+| `/pi stop` | Stop the running session in the current thread |
+
+### Cancel button
+
+Tool call summaries in spawned threads include a **Cancel** button. Clicking it kills the RPC child session immediately.
 
 ### Tools
 

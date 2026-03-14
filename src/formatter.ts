@@ -5,8 +5,12 @@ const TABLE_ROW_RE = /^\|(.+\|)+$/;
 const SEPARATOR_RE = /^\|[\s:-]+(\|[\s:-]+)+\|?$/;
 const FENCE_RE = /^(`{3,}|~{3,})(.*)?$/;
 
-export function formatIncoming(username: string, content: string): string {
-  return `[Discord @${username}]: ${content}`;
+export function formatIncoming(username: string, content: string, replyContext?: string): string {
+  const prefix = `[Discord @${username}]:`;
+  if (replyContext) {
+    return `${prefix} ${replyContext}\n${content}`;
+  }
+  return `${prefix} ${content}`;
 }
 
 export function extractText(message: AssistantMessage): string {

@@ -5,8 +5,16 @@ import {
   ChannelType,
   Partials,
   AttachmentBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  ActionRowBuilder,
+  REST,
+  Routes,
+  SlashCommandBuilder,
   type Message,
   type TextChannel,
+  type ButtonInteraction,
+  type ChatInputCommandInteraction,
 } from "discord.js";
 import type { RelayConfig } from "./types.js";
 
@@ -15,12 +23,16 @@ export interface DiscordImage {
   mimeType: string;
 }
 
-export type MessageHandler = (
-  channelId: string,
-  username: string,
-  content: string,
-  images: DiscordImage[]
-) => void;
+export interface IncomingMessage {
+  channelId: string;
+  username: string;
+  content: string;
+  images: DiscordImage[];
+  replyContext?: string;
+}
+
+export type MessageHandler = (msg: IncomingMessage) => void;
+export type CancelHandler = (threadId: string) => void;
 
 const IMAGE_MIME_TYPES = new Set([
   "image/png",
@@ -81,6 +93,8 @@ export class DiscordClient {
   private lastProcessedMessageId: string | null = null;
   private _connected = false;
   public onThreadArchived: ((threadId: string) => void) | null = null;
+  public onCancel: CancelHandler | null = null;
+  public onSlashCommand: ((interaction: ChatInputCommandInteraction) => void) | null = null;
 
   constructor(
     private config: RelayConfig,
@@ -104,6 +118,14 @@ export class DiscordClient {
 
     client.on(Events.MessageCreate, (message) => {
       this.handleMessage(message);
+    });
+
+    client.on(Events.InteractionCreate, async (interaction) => {
+      if (interaction.isButton() && interaction.customId.startsWith("pi-cancel:")) {
+        await this.handleCancelButton(interaction as ButtonInteraction);
+      } else if (interaction.isChatInputCommand() && interaction.commandName === "pi") {
+        this.onSlashCommand?.(interaction as ChatInputCommandInteraction);
+      }
     });
 
     client.on(Events.ClientReady, (c) => {
@@ -175,7 +197,6 @@ export class DiscordClient {
 
     const channelId = message.channelId;
 
-    // Accept messages in configured channels or threads under them
     const isConfiguredChannel = this.config.channels.includes(channelId);
     const parentId = message.channel.isThread() ? message.channel.parentId : null;
     const isChildThread = !!parentId && this.config.channels.includes(parentId);
@@ -204,8 +225,24 @@ export class DiscordClient {
       console.error(`[pi-relay] Error processing attachments:`, e.message);
     }
 
+    let replyContext: string | undefined;
+    if (message.reference?.messageId) {
+      try {
+        const referenced = await message.channel.messages.fetch(message.reference.messageId);
+        if (referenced.content) {
+          const author = referenced.author.bot ? "pi" : (referenced.author.displayName ?? referenced.author.username);
+          const snippet = referenced.content.length > 200
+            ? referenced.content.slice(0, 200) + "…"
+            : referenced.content;
+          replyContext = `[replying to ${author}: ${snippet}]`;
+        }
+      } catch {
+        // referenced message may be deleted
+      }
+    }
+
     const username = message.author.displayName ?? message.author.username;
-    this.onMessage(channelId, username, message.content ?? "", images);
+    this.onMessage({ channelId, username, content: message.content ?? "", images, replyContext });
   }
 
   async sendMessage(channelId: string, text: string): Promise<string | null> {
@@ -300,5 +337,63 @@ export class DiscordClient {
       }
     }
     return names;
+  }
+
+  async sendMessageWithCancel(channelId: string, text: string): Promise<string | null> {
+    if (!this.client) return null;
+
+    const channel = await this.client.channels.fetch(channelId);
+    if (!channel || !("send" in channel)) return null;
+
+    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`pi-cancel:${channelId}`)
+        .setLabel("Cancel")
+        .setStyle(ButtonStyle.Danger)
+        .setEmoji("✖️"),
+    );
+
+    const msg = await (channel as TextChannel).send({ content: text, components: [row] });
+    return msg.id;
+  }
+
+  async removeComponents(channelId: string, messageId: string): Promise<void> {
+    if (!this.client) return;
+    try {
+      const channel = await this.client.channels.fetch(channelId);
+      if (!channel || !("messages" in channel)) return;
+      const msg = await (channel as TextChannel).messages.fetch(messageId);
+      await msg.edit({ components: [] });
+    } catch {
+      // message may be deleted
+    }
+  }
+
+  private async handleCancelButton(interaction: ButtonInteraction): Promise<void> {
+    const threadId = interaction.customId.replace("pi-cancel:", "");
+    this.onCancel?.(threadId);
+    await interaction.reply({ content: "🛑 Cancelling…", flags: 64 });
+  }
+
+  async registerSlashCommands(): Promise<void> {
+    const appId = this.config.discord.applicationId;
+    if (!appId) return;
+
+    const commands = [
+      new SlashCommandBuilder()
+        .setName("pi")
+        .setDescription("Interact with pi")
+        .addSubcommand(sub =>
+          sub.setName("status")
+            .setDescription("Show pi-relay status"))
+        .addSubcommand(sub =>
+          sub.setName("stop")
+            .setDescription("Stop a running session in this thread"))
+        .toJSON(),
+    ];
+
+    const rest = new REST({ version: "10" }).setToken(this.config.discord.token);
+    await rest.put(Routes.applicationCommands(appId), { body: commands });
+    console.log("[pi-relay] Slash commands registered");
   }
 }

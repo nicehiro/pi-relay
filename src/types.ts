@@ -1,6 +1,7 @@
 export interface RelayConfig {
   discord: {
     token: string;
+    applicationId?: string;
   };
   machine: {
     name: string;

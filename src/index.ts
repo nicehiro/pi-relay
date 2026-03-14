@@ -4,7 +4,7 @@ import { basename } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { loadConfig } from "./config.js";
 import { setupProxy } from "./proxy.js";
-import type { DiscordClient, DiscordImage } from "./discord.js";
+import type { DiscordClient, IncomingMessage } from "./discord.js";
 import {
   formatIncoming,
   extractText,
@@ -25,7 +25,9 @@ export default function (pi: ExtensionAPI) {
   let coalescer: StreamCoalescer | null = null;
   let prevTextLen = 0;
 
-  function handleDiscordMessage(channelId: string, username: string, content: string, images: DiscordImage[]) {
+  function handleDiscordMessage(msg: IncomingMessage) {
+    const { channelId, username, content, images, replyContext } = msg;
+
     const child = children.get(channelId);
     if (child) {
       child.sendPrompt(username, content, images);
@@ -40,13 +42,22 @@ export default function (pi: ExtensionAPI) {
     prevTextLen = 0;
     if (images.length > 0) {
       const parts: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = [];
-      parts.push({ type: "text", text: formatIncoming(username, content || "[image]") });
+      parts.push({ type: "text", text: formatIncoming(username, content || "[image]", replyContext) });
       for (const img of images) {
         parts.push({ type: "image", data: img.data, mimeType: img.mimeType });
       }
       pi.sendUserMessage(parts, { deliverAs: "followUp" });
     } else {
-      pi.sendUserMessage(formatIncoming(username, content), { deliverAs: "followUp" });
+      pi.sendUserMessage(formatIncoming(username, content, replyContext), { deliverAs: "followUp" });
+    }
+  }
+
+  function handleCancel(threadId: string) {
+    const child = children.get(threadId);
+    if (child) {
+      child.kill();
+      children.delete(threadId);
+      discord?.sendMessage(threadId, "🛑 Session cancelled").catch(() => {});
     }
   }
 
@@ -58,6 +69,37 @@ export default function (pi: ExtensionAPI) {
     discord = new DiscordClient(config, handleDiscordMessage);
     await discord.connect();
     return config;
+  }
+
+  function wireDiscordCallbacks() {
+    if (!discord) return;
+    discord.onThreadArchived = handleThreadArchived;
+    discord.onCancel = handleCancel;
+    discord.onSlashCommand = (interaction) => {
+      const sub = interaction.options.getSubcommand();
+      if (sub === "status") {
+        const channelNames = discord?.getChannelNames() ?? new Map();
+        const lines = [
+          `**pi-relay** ${discord?.connected ? "🟢" : "🔴"}`,
+          `Machine: ${configRef?.machine.name ?? "unknown"}`,
+          `Sessions: ${children.size}`,
+        ];
+        for (const id of configRef?.channels ?? []) {
+          lines.push(`#${channelNames.get(id) ?? id}`);
+        }
+        interaction.reply({ content: lines.join("\n"), flags: 64 });
+      } else if (sub === "stop") {
+        const threadId = interaction.channelId;
+        const child = children.get(threadId);
+        if (child) {
+          child.kill();
+          children.delete(threadId);
+          interaction.reply({ content: "🛑 Session stopped" });
+        } else {
+          interaction.reply({ content: "No active session in this thread", flags: 64 });
+        }
+      }
+    };
   }
 
   function handleThreadArchived(threadId: string): void {
@@ -109,6 +151,12 @@ export default function (pi: ExtensionAPI) {
     try {
       const config = await createDiscordClient();
       discord!.onThreadArchived = handleThreadArchived;
+      wireDiscordCallbacks();
+      try {
+        await discord!.registerSlashCommands();
+      } catch (e: any) {
+        console.warn(`[pi-relay] Slash command registration failed: ${e.message}`);
+      }
 
       const resumed = await resumeExistingSessions();
 
@@ -312,6 +360,12 @@ export default function (pi: ExtensionAPI) {
           await discord?.disconnect();
           const config = await createDiscordClient();
           discord!.onThreadArchived = handleThreadArchived;
+          wireDiscordCallbacks();
+          try {
+            await discord!.registerSlashCommands();
+          } catch (e: any) {
+            console.warn(`[pi-relay] Slash command registration failed: ${e.message}`);
+          }
           const resumed = await resumeExistingSessions();
           ctx.ui.setStatus("pi-relay", `🔗 ${config.machine.name}`);
           const msg = resumed > 0
