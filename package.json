@@ -1,17 +1,37 @@
 {
   "name": "pi-relay",
-  "private": true,
   "version": "0.1.0",
+  "description": "Discord bridge extension for pi — route messages, spawn sessions, stream output",
   "type": "module",
+  "keywords": ["pi-package"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nicehiro/pi-relay.git"
+  },
+  "files": [
+    "dist",
+    "config.example.yaml",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build"
+  },
   "pi": {
     "extensions": [
-      "./src/index.ts"
+      "./dist/index.js"
     ]
   },
   "dependencies": {
     "discord.js": "^14.18.0",
     "https-proxy-agent": "^8.0.0",
     "yaml": "^2.7.0"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-ai": "*",
+    "@sinclair/typebox": "*"
   },
   "devDependencies": {
     "@mariozechner/pi-coding-agent": "latest",

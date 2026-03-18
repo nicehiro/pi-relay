@@ -11,33 +11,27 @@ import {
   formatToolCalls,
   splitMessage,
 } from "./formatter.js";
-import { RpcChild } from "./rpc-child.js";
+import { SessionChild } from "./session-child.js";
 import { StreamCoalescer } from "./stream.js";
 import type { PendingChat } from "./types.js";
 
 export default function (pi: ExtensionAPI) {
-  if (process.env.PI_RELAY_CHILD) return;
+
   let discord: DiscordClient | null = null;
   let pendingChat: PendingChat | null = null;
   let configRef: ReturnType<typeof loadConfig> | null = null;
-  const children = new Map<string, RpcChild>();
+  const children = new Map<string, SessionChild>();
 
   let coalescer: StreamCoalescer | null = null;
   let prevTextLen = 0;
 
   function handleDiscordMessage(channelId: string, username: string, content: string, images: DiscordImage[]) {
-    // Route to RPC child if message is in a managed thread
     const child = children.get(channelId);
     if (child) {
-      if (child.hasPendingUI) {
-        child.handleUIResponse(content);
-      } else {
-        child.sendPrompt(username, content, images);
-      }
+      child.sendPrompt(username, content, images);
       return;
     }
 
-    // Main channel → master pi
     if (!configRef?.channels.includes(channelId)) return;
 
     pendingChat = { channelId, username };
@@ -73,10 +67,9 @@ export default function (pi: ExtensionAPI) {
     children.delete(threadId);
   }
 
-  function killAllChildren(): void {
-    for (const child of children.values()) {
-      child.kill();
-    }
+  async function killAllChildren(): Promise<void> {
+    const kills = Array.from(children.values()).map((c) => c.kill());
+    await Promise.allSettled(kills);
     children.clear();
   }
 
@@ -97,7 +90,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_shutdown", async () => {
     coalescer?.reset();
     coalescer = null;
-    killAllChildren();
+    await killAllChildren();
     await discord?.disconnect();
   });
 
@@ -195,7 +188,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "spawn_session",
     label: "Spawn Session",
-    description: "Spawn a new pi session in a tmux session with its own Discord thread",
+    description: "Spawn a new pi session in a Discord thread with its own working directory",
     promptGuidelines: [
       "Use spawn_session when a Discord user asks to start a new session or work on a task in a specific directory",
       "Extract working directory, session name, and task from the user's free-form request",
@@ -219,13 +212,20 @@ export default function (pi: ExtensionAPI) {
       const welcome = `🤖 **pi** session spawned\n📁 \`${cwd}\`\n🖥️ ${configRef.machine.name}`;
       const threadId = await discord.createThread(channelId, name, welcome);
 
-      const child = new RpcChild(threadId, discord, cwd);
+      const child = new SessionChild(threadId, discord, cwd);
       child.onExit = () => {
         children.delete(threadId);
         discord?.sendMessage(threadId, "🔌 Session ended").catch(() => {});
       };
       children.set(threadId, child);
-      child.start(params.task);
+
+      try {
+        await child.start(params.task);
+      } catch (e: any) {
+        children.delete(threadId);
+        await discord.sendMessage(threadId, `❌ Failed to start session: ${e.message}`);
+        throw new Error(`Failed to start session: ${e.message}`);
+      }
 
       return {
         content: [{ type: "text", text: `Spawned session in thread "${name}"\ncwd: ${cwd}` }],
@@ -258,6 +258,9 @@ export default function (pi: ExtensionAPI) {
           }
           if (children.size > 0) {
             lines.push(`Active sessions: ${children.size}`);
+            for (const [threadId, child] of children) {
+              lines.push(`  thread:${threadId.slice(-6)} alive:${child.alive}`);
+            }
           }
         } else {
           lines.push(`Config: not loaded`);
@@ -269,7 +272,7 @@ export default function (pi: ExtensionAPI) {
 
       if (sub === "reconnect") {
         try {
-          killAllChildren();
+          await killAllChildren();
           await discord?.disconnect();
           const config = await createDiscordClient();
           discord!.onThreadArchived = handleThreadArchived;
@@ -282,7 +285,7 @@ export default function (pi: ExtensionAPI) {
       }
 
       if (sub === "disconnect") {
-        killAllChildren();
+        await killAllChildren();
         await discord?.disconnect();
         ctx.ui.setStatus("pi-relay", "⚪ disconnected");
         ctx.ui.notify("Disconnected from Discord", "info");

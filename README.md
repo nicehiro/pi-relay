@@ -29,40 +29,39 @@ The master pi session runs interactively (TUI) and owns all Discord I/O. Message
 When the master spawns a child session (via the `spawn_session` tool), it:
 
 1. Creates a Discord thread in the channel
-2. Starts a `pi --mode rpc` child process with its own working directory
-3. Routes all thread messages to the child via stdin JSONL
-4. Routes child output back to the thread
+2. Creates an in-process `AgentSession` via the pi SDK with its own working directory
+3. Routes all thread messages to the child session
+4. Subscribes to child events and routes output back to the thread
 
 ```
 Master pi (interactive, runs pi-relay)
 ├── Discord client (single connection)
 │   ├── #channel messages  →  master pi session
-│   ├── thread-1 messages  →  RPC child A (stdin/stdout)
-│   ├── thread-2 messages  →  RPC child B (stdin/stdout)
-│   └── thread-3 messages  →  RPC child C (stdin/stdout)
+│   ├── thread-1 messages  →  AgentSession A (cwd: /project-a)
+│   ├── thread-2 messages  →  AgentSession B (cwd: /project-b)
+│   └── thread-3 messages  →  AgentSession C (cwd: /project-c)
 │
-├── RPC Child A: pi --mode rpc --cwd /project-a
-├── RPC Child B: pi --mode rpc --cwd /project-b
-└── RPC Child C: pi --mode rpc --cwd /project-c
+├── AgentSession A (in-memory, /project-a)
+├── AgentSession B (in-memory, /project-b)
+└── AgentSession C (in-memory, /project-c)
 ```
 
-Children die when the master restarts — no session persistence.
+Children use in-memory sessions — no persistence across master restarts.
 
 ### Stream coalescing
 
 Discord rate-limits message sends and edits. Instead of sending every text delta as a new message, the `StreamCoalescer` buffers streaming output and periodically edits a single Discord message in place (~800ms intervals). When the message nears Discord's 2000-char limit, it finalizes the current message and starts a new one. On turn end, any remaining buffer is flushed.
 
-This applies to both the master session and all RPC children.
+This applies to both the master session and all child sessions.
 
-### Extension UI forwarding
+### Child sessions
 
-RPC children may trigger interactive prompts (confirm, select, input, editor) that normally appear in the TUI. Since children have no TUI, these are forwarded to Discord:
+When the master spawns a child session (via the `spawn_session` tool), it uses the pi SDK's `createAgentSession()` to create an in-process `AgentSession` — no subprocess. The child session:
 
-- **confirm** → "Reply `yes` or `no`"
-- **select** → numbered list, "Reply with a number"
-- **input / editor** → "Reply with your text, or `/cancel`"
-
-The child is paused until the Discord user responds. Any message in the thread while a UI prompt is pending is treated as the response.
+- Loads global extensions (except pi-relay itself, to prevent recursion)
+- Uses `SessionManager.inMemory()` (no session persistence)
+- Subscribes to typed `AgentSessionEvent`s and routes them to Discord
+- Surfaces auto-compaction and auto-retry events as Discord messages
 
 ### Proxy support
 
@@ -74,7 +73,7 @@ Discord connections (both WebSocket gateway and REST API) can be routed through 
 |---|---|
 | `src/index.ts` | Extension entry — registers events, tools, commands; routes messages between Discord and pi |
 | `src/discord.ts` | Discord client — connect, send, edit, typing, threads, image attachments |
-| `src/rpc-child.ts` | RPC child process wrapper — spawn, JSONL protocol, event routing, Extension UI |
+| `src/session-child.ts` | Child session via SDK `AgentSession` — event routing, stream coalescing, compaction/retry notifications |
 | `src/stream.ts` | `StreamCoalescer` — batches streaming text into Discord message edits |
 | `src/formatter.ts` | Format messages between pi and Discord (tool call summaries, message splitting) |
 | `src/config.ts` | Load and validate config from YAML |
@@ -84,15 +83,13 @@ Discord connections (both WebSocket gateway and REST API) can be routed through 
 ## Install
 
 ```bash
-pi install https://github.com/nicehiro/pi-relay
+pi install npm:pi-relay
 ```
 
-Or add to `~/.pi/agent/settings.json`:
+Or from git:
 
-```json
-{
-  "packages": ["git:github.com/nicehiro/pi-relay"]
-}
+```bash
+pi install https://github.com/nicehiro/pi-relay
 ```
 
 ## Setup
