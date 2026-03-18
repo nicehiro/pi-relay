@@ -64,6 +64,8 @@ function readSessionHeader(filePath: string): { cwd: string } | null {
 export class SessionChild {
   private session: AgentSession | null = null;
   private coalescer: StreamCoalescer | null = null;
+  private toolProgressTimers = new Map<string, ReturnType<typeof setTimeout>>(); // toolCallId → debounce timer
+  private toolProgressMessages = new Map<string, string>(); // toolCallId → messageId
   private _alive = false;
 
   public onExit: (() => void) | null = null;
@@ -178,6 +180,7 @@ export class SessionChild {
 
     this.coalescer?.reset();
     this.coalescer = null;
+    await this.cleanupProgressMessages();
     this.onExit?.();
   }
 
@@ -203,9 +206,34 @@ export class SessionChild {
         await this.handleTurnEnd(event.message, event.toolResults);
         break;
 
-      case "tool_execution_start":
-        await this.discord.sendTyping(this.threadId);
+      case "tool_execution_start": {
+        const timer = setTimeout(async () => {
+          this.toolProgressTimers.delete(event.toolCallId);
+          const msgId = await this.discord.sendMessage(
+            this.threadId,
+            `⏳ Running \`${event.toolName}\`…`,
+          );
+          if (msgId) {
+            this.toolProgressMessages.set(event.toolCallId, msgId);
+          }
+        }, 500);
+        this.toolProgressTimers.set(event.toolCallId, timer);
         break;
+      }
+
+      case "tool_execution_end": {
+        const timer = this.toolProgressTimers.get(event.toolCallId);
+        if (timer) {
+          clearTimeout(timer);
+          this.toolProgressTimers.delete(event.toolCallId);
+        }
+        const msgId = this.toolProgressMessages.get(event.toolCallId);
+        if (msgId) {
+          this.toolProgressMessages.delete(event.toolCallId);
+          await this.discord.deleteMessage(this.threadId, msgId);
+        }
+        break;
+      }
 
       case "auto_compaction_start":
         await this.discord.sendMessage(
@@ -251,6 +279,18 @@ export class SessionChild {
     }
   }
 
+  private async cleanupProgressMessages(): Promise<void> {
+    for (const timer of this.toolProgressTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.toolProgressTimers.clear();
+    const messageIds = [...this.toolProgressMessages.values()];
+    this.toolProgressMessages.clear();
+    await Promise.all(
+      messageIds.map((msgId) => this.discord.deleteMessage(this.threadId, msgId)),
+    );
+  }
+
   private async handleTurnEnd(
     message: unknown,
     toolResults: ToolResultMessage[],
@@ -259,6 +299,8 @@ export class SessionChild {
       await this.coalescer.flush();
       this.coalescer = null;
     }
+
+    await this.cleanupProgressMessages();
 
     // Upload images from tool results
     for (const tr of toolResults) {

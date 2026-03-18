@@ -232,6 +232,19 @@ export class DiscordClient {
     }
   }
 
+  async deleteMessage(channelId: string, messageId: string): Promise<boolean> {
+    if (!this.client) return false;
+    try {
+      const channel = await this.client.channels.fetch(channelId);
+      if (!channel || !("messages" in channel)) return false;
+      const msg = await (channel as TextChannel).messages.fetch(messageId);
+      await msg.delete();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   async sendTyping(channelId: string): Promise<void> {
     if (!this.client) return;
 
