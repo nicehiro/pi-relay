@@ -9,9 +9,57 @@ import {
 } from "@mariozechner/pi-coding-agent";
 import type { AgentSession } from "@mariozechner/pi-coding-agent";
 import type { AssistantMessage, ToolResultMessage } from "@mariozechner/pi-ai";
+import { join } from "node:path";
+import { existsSync, readdirSync, statSync, openSync, readSync, closeSync } from "node:fs";
 import type { DiscordClient, DiscordImage } from "./discord.js";
 import { formatToolCalls } from "./formatter.js";
 import { StreamCoalescer } from "./stream.js";
+
+const SESSIONS_BASE = join(
+  process.env.HOME ?? "/root",
+  ".pi/agent/pi-relay/sessions",
+);
+
+export function sessionDirForThread(threadId: string): string {
+  return join(SESSIONS_BASE, threadId);
+}
+
+function findRecentSessionFile(dir: string): string | null {
+  try {
+    const files = readdirSync(dir)
+      .filter((f) => f.endsWith(".jsonl"))
+      .map((f) => {
+        const p = join(dir, f);
+        return { path: p, mtime: statSync(p).mtime };
+      })
+      .sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
+    return files[0]?.path ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function readSessionHeader(filePath: string): { cwd: string } | null {
+  try {
+    const fd = openSync(filePath, "r");
+    const buf = Buffer.alloc(1024);
+    const bytesRead = readSync(fd, buf, 0, 1024, 0);
+    closeSync(fd);
+    const firstLine = buf.toString("utf-8", 0, bytesRead).split("\n")[0];
+    if (!firstLine) return null;
+    const header = JSON.parse(firstLine);
+    if (
+      header.type === "session" &&
+      typeof header.id === "string" &&
+      typeof header.cwd === "string"
+    ) {
+      return { cwd: header.cwd };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
 
 export class SessionChild {
   private session: AgentSession | null = null;
@@ -20,13 +68,41 @@ export class SessionChild {
 
   public onExit: (() => void) | null = null;
 
-  constructor(
+  private constructor(
     private threadId: string,
     private discord: DiscordClient,
     private cwd: string,
+    private sessionManager: SessionManager,
   ) {}
 
   get alive() { return this._alive; }
+
+  static create(
+    threadId: string,
+    discord: DiscordClient,
+    cwd: string,
+  ): SessionChild {
+    const sessionDir = sessionDirForThread(threadId);
+    const sm = SessionManager.create(cwd, sessionDir);
+    return new SessionChild(threadId, discord, cwd, sm);
+  }
+
+  static resume(
+    threadId: string,
+    discord: DiscordClient,
+  ): SessionChild | null {
+    const sessionDir = sessionDirForThread(threadId);
+    if (!existsSync(sessionDir)) return null;
+
+    const filePath = findRecentSessionFile(sessionDir);
+    if (!filePath) return null;
+
+    const header = readSessionHeader(filePath);
+    if (!header) return null;
+
+    const sm = SessionManager.open(filePath, sessionDir);
+    return new SessionChild(threadId, discord, header.cwd, sm);
+  }
 
   async start(initialTask?: string): Promise<void> {
     const resourceLoader = new DefaultResourceLoader({
@@ -43,7 +119,7 @@ export class SessionChild {
     const { session } = await createAgentSession({
       cwd: this.cwd,
       resourceLoader,
-      sessionManager: SessionManager.inMemory(),
+      sessionManager: this.sessionManager,
     });
 
     this.session = session;

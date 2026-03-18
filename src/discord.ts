@@ -255,6 +255,25 @@ export class DiscordClient {
     await (channel as TextChannel).send({ files: [attachment] });
   }
 
+  async fetchActiveThreadIds(): Promise<string[]> {
+    if (!this.client) return [];
+
+    const ids: string[] = [];
+    for (const channelId of this.config.channels) {
+      try {
+        const channel = await this.client.channels.fetch(channelId);
+        if (!channel || !("threads" in channel)) continue;
+        const { threads } = await (channel as TextChannel).threads.fetchActive();
+        for (const thread of threads.values()) {
+          ids.push(thread.id);
+        }
+      } catch (e: any) {
+        console.error(`[pi-relay] Failed to fetch threads for channel ${channelId}:`, e.message);
+      }
+    }
+    return ids;
+  }
+
   getChannelNames(): Map<string, string> {
     const names = new Map<string, string>();
     if (!this.client) return names;

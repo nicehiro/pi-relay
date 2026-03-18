@@ -73,14 +73,50 @@ export default function (pi: ExtensionAPI) {
     children.clear();
   }
 
+  async function resumeExistingSessions(): Promise<number> {
+    if (!discord) return 0;
+
+    const activeThreadIds = await discord.fetchActiveThreadIds();
+    let resumed = 0;
+
+    for (const threadId of activeThreadIds) {
+      if (children.has(threadId)) continue;
+
+      const child = SessionChild.resume(threadId, discord);
+      if (!child) continue;
+
+      child.onExit = () => {
+        children.delete(threadId);
+        discord?.sendMessage(threadId, "🔌 Session ended").catch(() => {});
+      };
+      children.set(threadId, child);
+
+      try {
+        await child.start();
+        await discord.sendMessage(threadId, "🔄 Session resumed");
+        resumed++;
+      } catch (e: any) {
+        children.delete(threadId);
+        console.error(`[pi-relay] Failed to resume session in thread ${threadId}:`, e.message);
+      }
+    }
+    return resumed;
+  }
+
   // --- Events ---
 
   pi.on("session_start", async (_event, ctx) => {
     try {
       const config = await createDiscordClient();
       discord!.onThreadArchived = handleThreadArchived;
+
+      const resumed = await resumeExistingSessions();
+
       ctx.ui.setStatus("pi-relay", `🔗 ${config.machine.name}`);
-      ctx.ui.notify("pi-relay connected", "info");
+      const msg = resumed > 0
+        ? `pi-relay connected, resumed ${resumed} session(s)`
+        : "pi-relay connected";
+      ctx.ui.notify(msg, "info");
     } catch (e: any) {
       ctx.ui.setStatus("pi-relay", "❌ disconnected");
       ctx.ui.notify(`pi-relay failed: ${e.message}`, "error");
@@ -212,7 +248,7 @@ export default function (pi: ExtensionAPI) {
       const welcome = `🤖 **pi** session spawned\n📁 \`${cwd}\`\n🖥️ ${configRef.machine.name}`;
       const threadId = await discord.createThread(channelId, name, welcome);
 
-      const child = new SessionChild(threadId, discord, cwd);
+      const child = SessionChild.create(threadId, discord, cwd);
       child.onExit = () => {
         children.delete(threadId);
         discord?.sendMessage(threadId, "🔌 Session ended").catch(() => {});
@@ -276,8 +312,12 @@ export default function (pi: ExtensionAPI) {
           await discord?.disconnect();
           const config = await createDiscordClient();
           discord!.onThreadArchived = handleThreadArchived;
+          const resumed = await resumeExistingSessions();
           ctx.ui.setStatus("pi-relay", `🔗 ${config.machine.name}`);
-          ctx.ui.notify("Reconnected", "info");
+          const msg = resumed > 0
+            ? `Reconnected, resumed ${resumed} session(s)`
+            : "Reconnected";
+          ctx.ui.notify(msg, "info");
         } catch (e: any) {
           ctx.ui.notify(`Reconnect failed: ${e.message}`, "error");
         }
