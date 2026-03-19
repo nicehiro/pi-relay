@@ -1,6 +1,8 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import type { AssistantMessage } from "@mariozechner/pi-ai";
-import { basename } from "node:path";
+import { basename, join } from "node:path";
+import { readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { Type } from "@sinclair/typebox";
 import { loadConfig } from "./config.js";
 import { setupProxy } from "./proxy.js";
@@ -14,6 +16,8 @@ import {
 import { SessionChild } from "./session-child.js";
 import { StreamCoalescer } from "./stream.js";
 import type { PendingChat } from "./types.js";
+
+const RECONNECT_FILE = join(tmpdir(), "pi-relay-reconnect-channel");
 
 export default function (pi: ExtensionAPI) {
 
@@ -101,11 +105,13 @@ export default function (pi: ExtensionAPI) {
         }
       } else if (sub === "reload") {
         if (reloadFn) {
-          await interaction.reply({ content: "🔄 Reloading extensions…", flags: 64 });
-          reloadFn().catch(() => {});
+          const reconnectChannel = configRef?.channels[0] ?? interaction.channelId;
+          writeFileSync(RECONNECT_FILE, reconnectChannel, "utf-8");
+          await interaction.reply({ content: "🔄 Reloading and reconnecting…", flags: 64 });
+          reloadFn().catch((e) => console.error("[pi-relay] reload failed:", e));
         } else {
           await interaction.reply({
-            content: "⚠️ Run `/relay status` in the pi TUI first, then try again.",
+            content: "⚠️ pi-relay is not fully initialized yet.",
             flags: 64,
           });
         }
@@ -156,25 +162,36 @@ export default function (pi: ExtensionAPI) {
     return resumed;
   }
 
+  async function connectAndSetup(ctx: { ui: { setStatus(key: string, text: string | undefined): void; notify(message: string, type?: "info" | "warning" | "error"): void } }): Promise<void> {
+    const config = await createDiscordClient();
+    wireDiscordCallbacks();
+    try {
+      await discord!.registerSlashCommands();
+    } catch (e: any) {
+      console.warn(`[pi-relay] Slash command registration failed: ${e.message}`);
+    }
+    const resumed = await resumeExistingSessions();
+    ctx.ui.setStatus("pi-relay", `🔗 ${config.machine.name}`);
+    const msg = resumed > 0
+      ? `pi-relay connected, resumed ${resumed} session(s)`
+      : "pi-relay connected";
+    ctx.ui.notify(msg, "info");
+  }
+
   // --- Events ---
 
   pi.on("session_start", async (_event, ctx) => {
+    let reconnectChannel: string | undefined;
     try {
-      const config = await createDiscordClient();
-      wireDiscordCallbacks();
-      try {
-        await discord!.registerSlashCommands();
-      } catch (e: any) {
-        console.warn(`[pi-relay] Slash command registration failed: ${e.message}`);
+      reconnectChannel = readFileSync(RECONNECT_FILE, "utf-8").trim();
+      unlinkSync(RECONNECT_FILE);
+    } catch {}
+
+    try {
+      await connectAndSetup(ctx);
+      if (reconnectChannel) {
+        await discord?.sendMessage(reconnectChannel, "✅ pi-relay reconnected after reload");
       }
-
-      const resumed = await resumeExistingSessions();
-
-      ctx.ui.setStatus("pi-relay", `🔗 ${config.machine.name}`);
-      const msg = resumed > 0
-        ? `pi-relay connected, resumed ${resumed} session(s)`
-        : "pi-relay connected";
-      ctx.ui.notify(msg, "info");
     } catch (e: any) {
       ctx.ui.setStatus("pi-relay", "❌ disconnected");
       ctx.ui.notify(`pi-relay failed: ${e.message}`, "error");
@@ -334,15 +351,24 @@ export default function (pi: ExtensionAPI) {
     description: "Show Discord relay status",
     handler: async (args, ctx) => {
       reloadFn = () => ctx.reload();
-
       const sub = args.trim();
 
       if (sub === "status" || !sub) {
-        const connected = discord?.connected ?? false;
+        if (!discord?.connected) {
+          try {
+            ctx.ui.notify("Connecting to Discord…", "info");
+            await connectAndSetup(ctx);
+          } catch (e: any) {
+            ctx.ui.setStatus("pi-relay", "❌ disconnected");
+            ctx.ui.notify(`Connection failed: ${e.message}`, "error");
+            return;
+          }
+        }
+
         const channelNames = discord?.getChannelNames() ?? new Map();
         const lines = [
           `**pi-relay**`,
-          `Status: ${connected ? "🟢 connected" : "🔴 disconnected"}`,
+          `Status: 🟢 connected`,
         ];
 
         if (configRef) {
@@ -370,20 +396,8 @@ export default function (pi: ExtensionAPI) {
         try {
           await killAllChildren();
           await discord?.disconnect();
-          const config = await createDiscordClient();
-          discord!.onThreadArchived = handleThreadArchived;
-          wireDiscordCallbacks();
-          try {
-            await discord!.registerSlashCommands();
-          } catch (e: any) {
-            console.warn(`[pi-relay] Slash command registration failed: ${e.message}`);
-          }
-          const resumed = await resumeExistingSessions();
-          ctx.ui.setStatus("pi-relay", `🔗 ${config.machine.name}`);
-          const msg = resumed > 0
-            ? `Reconnected, resumed ${resumed} session(s)`
-            : "Reconnected";
-          ctx.ui.notify(msg, "info");
+          await connectAndSetup(ctx);
+          ctx.ui.notify("Reconnected", "info");
         } catch (e: any) {
           ctx.ui.notify(`Reconnect failed: ${e.message}`, "error");
         }
