@@ -14,6 +14,7 @@ import { existsSync, readdirSync, statSync, openSync, readSync, closeSync } from
 import type { DiscordClient, DiscordImage } from "./discord.js";
 import { formatToolCalls } from "./formatter.js";
 import { StreamCoalescer } from "./stream.js";
+import { createDiscordUIContext } from "./discord-ui.js";
 
 const SESSIONS_BASE = join(
   process.env.HOME ?? "/root",
@@ -126,6 +127,9 @@ export class SessionChild {
 
     this.session = session;
     this._alive = true;
+
+    const uiContext = createDiscordUIContext(this.threadId, this.discord);
+    await session.bindExtensions({ uiContext });
 
     session.subscribe(((event: AgentSessionEvent) => {
       this.handleEvent(event).catch((e) =>

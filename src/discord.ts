@@ -369,6 +369,134 @@ export class DiscordClient {
     }
   }
 
+  async sendConfirmation(
+    channelId: string,
+    title: string,
+    message: string,
+    options?: { timeout?: number; signal?: AbortSignal },
+  ): Promise<boolean> {
+    if (!this.client) return false;
+
+    const channel = await this.client.channels.fetch(channelId);
+    if (!channel || !("send" in channel)) return false;
+
+    const id = Math.random().toString(36).slice(2, 10);
+    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`pi-confirm:${id}:yes`)
+        .setLabel("Allow")
+        .setStyle(ButtonStyle.Success)
+        .setEmoji("✅"),
+      new ButtonBuilder()
+        .setCustomId(`pi-confirm:${id}:no`)
+        .setLabel("Deny")
+        .setStyle(ButtonStyle.Danger)
+        .setEmoji("❌"),
+    );
+
+    const text = message ? `**${title}**\n${message}` : `**${title}**`;
+    const msg = await (channel as TextChannel).send({ content: text, components: [row] });
+
+    const timeoutMs = options?.timeout ?? 60_000;
+
+    return new Promise<boolean>((resolve) => {
+      const collector = msg.createMessageComponentCollector({ time: timeoutMs });
+      let resolved = false;
+
+      const cleanup = (result: boolean, label: string) => {
+        if (resolved) return;
+        resolved = true;
+        collector.stop();
+        msg.edit({ content: `${text}\n\n${label}`, components: [] }).catch(() => {});
+        resolve(result);
+      };
+
+      if (options?.signal) {
+        if (options.signal.aborted) {
+          cleanup(false, "🚫 Cancelled");
+          return;
+        }
+        options.signal.addEventListener("abort", () => cleanup(false, "🚫 Cancelled"), { once: true });
+      }
+
+      collector.on("collect", async (i) => {
+        if (!i.customId.startsWith(`pi-confirm:${id}:`)) return;
+        const confirmed = i.customId.endsWith(":yes");
+        const who = i.user.displayName ?? i.user.username;
+        await i.update({
+          content: `${text}\n\n${confirmed ? "✅ Allowed" : "❌ Denied"} by ${who}`,
+          components: [],
+        });
+        if (!resolved) { resolved = true; collector.stop(); resolve(confirmed); }
+      });
+
+      collector.on("end", (_collected, reason) => {
+        if (reason === "time") cleanup(false, "⏰ Timed out — denied");
+      });
+    });
+  }
+
+  async sendSelect(
+    channelId: string,
+    title: string,
+    options: string[],
+    selectOptions?: { timeout?: number; signal?: AbortSignal },
+  ): Promise<string | undefined> {
+    if (!this.client) return undefined;
+
+    const channel = await this.client.channels.fetch(channelId);
+    if (!channel || !("send" in channel)) return undefined;
+
+    const id = Math.random().toString(36).slice(2, 10);
+    const buttons = options.slice(0, 5).map((opt, i) =>
+      new ButtonBuilder()
+        .setCustomId(`pi-select:${id}:${i}`)
+        .setLabel(opt.slice(0, 80))
+        .setStyle(i === 0 ? ButtonStyle.Primary : ButtonStyle.Secondary),
+    );
+    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(...buttons);
+
+    const msg = await (channel as TextChannel).send({ content: `**${title}**`, components: [row] });
+    const timeoutMs = selectOptions?.timeout ?? 60_000;
+
+    return new Promise<string | undefined>((resolve) => {
+      const collector = msg.createMessageComponentCollector({ time: timeoutMs });
+      let resolved = false;
+
+      const cleanup = (result: string | undefined, label: string) => {
+        if (resolved) return;
+        resolved = true;
+        collector.stop();
+        msg.edit({ content: `**${title}**\n\n${label}`, components: [] }).catch(() => {});
+        resolve(result);
+      };
+
+      if (selectOptions?.signal) {
+        if (selectOptions.signal.aborted) {
+          cleanup(undefined, "🚫 Cancelled");
+          return;
+        }
+        selectOptions.signal.addEventListener("abort", () => cleanup(undefined, "🚫 Cancelled"), { once: true });
+      }
+
+      collector.on("collect", async (i) => {
+        if (!i.customId.startsWith(`pi-select:${id}:`)) return;
+        const idx = parseInt(i.customId.split(":")[2], 10);
+        const chosen = options[idx];
+        const who = i.user.displayName ?? i.user.username;
+        await i.update({
+          content: `**${title}**\n\n→ **${chosen}** (${who})`,
+          components: [],
+        });
+        if (!resolved) { resolved = true; collector.stop(); resolve(chosen); }
+      });
+
+      collector.on("end", (_collected, reason) => {
+        if (reason === "time") cleanup(undefined, "⏰ Timed out");
+      });
+    });
+  }
+
   private async handleCancelButton(interaction: ButtonInteraction): Promise<void> {
     const threadId = interaction.customId.replace("pi-cancel:", "");
     this.onCancel?.(threadId);
