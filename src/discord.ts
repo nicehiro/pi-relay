@@ -94,7 +94,7 @@ export class DiscordClient {
   private _connected = false;
   public onThreadArchived: ((threadId: string) => void) | null = null;
   public onCancel: CancelHandler | null = null;
-  public onSlashCommand: ((interaction: ChatInputCommandInteraction) => void) | null = null;
+  public onSlashCommand: ((interaction: ChatInputCommandInteraction) => void | Promise<void>) | null = null;
 
   constructor(
     private config: RelayConfig,
@@ -124,7 +124,7 @@ export class DiscordClient {
       if (interaction.isButton() && interaction.customId.startsWith("pi-cancel:")) {
         await this.handleCancelButton(interaction as ButtonInteraction);
       } else if (interaction.isChatInputCommand() && interaction.commandName === "pi") {
-        this.onSlashCommand?.(interaction as ChatInputCommandInteraction);
+        await this.onSlashCommand?.(interaction as ChatInputCommandInteraction);
       }
     });
 
@@ -389,6 +389,9 @@ export class DiscordClient {
         .addSubcommand(sub =>
           sub.setName("stop")
             .setDescription("Stop a running session in this thread"))
+        .addSubcommand(sub =>
+          sub.setName("reload")
+            .setDescription("Reload pi extensions"))
         .toJSON(),
     ];
 

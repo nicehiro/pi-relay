@@ -20,6 +20,7 @@ export default function (pi: ExtensionAPI) {
   let discord: DiscordClient | null = null;
   let pendingChat: PendingChat | null = null;
   let configRef: ReturnType<typeof loadConfig> | null = null;
+  let reloadFn: (() => Promise<void>) | null = null;
   const children = new Map<string, SessionChild>();
 
   let coalescer: StreamCoalescer | null = null;
@@ -75,7 +76,7 @@ export default function (pi: ExtensionAPI) {
     if (!discord) return;
     discord.onThreadArchived = handleThreadArchived;
     discord.onCancel = handleCancel;
-    discord.onSlashCommand = (interaction) => {
+    discord.onSlashCommand = async (interaction) => {
       const sub = interaction.options.getSubcommand();
       if (sub === "status") {
         const channelNames = discord?.getChannelNames() ?? new Map();
@@ -87,16 +88,26 @@ export default function (pi: ExtensionAPI) {
         for (const id of configRef?.channels ?? []) {
           lines.push(`#${channelNames.get(id) ?? id}`);
         }
-        interaction.reply({ content: lines.join("\n"), flags: 64 });
+        await interaction.reply({ content: lines.join("\n"), flags: 64 });
       } else if (sub === "stop") {
         const threadId = interaction.channelId;
         const child = children.get(threadId);
         if (child) {
           child.kill();
           children.delete(threadId);
-          interaction.reply({ content: "🛑 Session stopped" });
+          await interaction.reply({ content: "🛑 Session stopped" });
         } else {
-          interaction.reply({ content: "No active session in this thread", flags: 64 });
+          await interaction.reply({ content: "No active session in this thread", flags: 64 });
+        }
+      } else if (sub === "reload") {
+        if (reloadFn) {
+          await interaction.reply({ content: "🔄 Reloading extensions…", flags: 64 });
+          reloadFn().catch(() => {});
+        } else {
+          await interaction.reply({
+            content: "⚠️ Run `/relay status` in the pi TUI first, then try again.",
+            flags: 64,
+          });
         }
       }
     };
@@ -150,7 +161,6 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     try {
       const config = await createDiscordClient();
-      discord!.onThreadArchived = handleThreadArchived;
       wireDiscordCallbacks();
       try {
         await discord!.registerSlashCommands();
@@ -323,6 +333,8 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand("relay", {
     description: "Show Discord relay status",
     handler: async (args, ctx) => {
+      reloadFn = () => ctx.reload();
+
       const sub = args.trim();
 
       if (sub === "status" || !sub) {
@@ -386,8 +398,14 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
+      if (sub === "reload") {
+        ctx.ui.notify("Reloading extensions…", "info");
+        await ctx.reload();
+        return;
+      }
+
       ctx.ui.notify(
-        "Usage: /relay [status|reconnect|disconnect]",
+        "Usage: /relay [status|reconnect|disconnect|reload]",
         "warning"
       );
     },
