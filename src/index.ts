@@ -187,11 +187,11 @@ export default function (pi: ExtensionAPI) {
       unlinkSync(RECONNECT_FILE);
     } catch {}
 
+    if (!reconnectChannel) return;
+
     try {
       await connectAndSetup(ctx);
-      if (reconnectChannel) {
-        await discord?.sendMessage(reconnectChannel, "✅ pi-relay reconnected after reload");
-      }
+      await discord?.sendMessage(reconnectChannel, "✅ pi-relay reconnected after reload");
     } catch (e: any) {
       ctx.ui.setStatus("pi-relay", "❌ disconnected");
       ctx.ui.notify(`pi-relay failed: ${e.message}`, "error");
